@@ -1,0 +1,18 @@
+[Unit]
+Description=Protocol Gateway (PGW)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/opt/pgw/PGW.Host
+User=pgw
+Group=pgw
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+Environment=PGW_CONFIG=/etc/pgw/project.yaml
+
+[Install]
+WantedBy=multi-user.target

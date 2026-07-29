@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    paths: ["pgw/**"]
+  pull_request:
+    paths: ["pgw/**"]
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: pgw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: dotnet restore PGW.sln
+      - run: dotnet build PGW.sln --no-restore -c Release
+      - run: dotnet test PGW.sln --no-build -c Release

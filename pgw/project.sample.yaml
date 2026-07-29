@@ -1,0 +1,46 @@
+# Sample project file (§7.2). Copy to /etc/pgw/project.yaml (Linux) or
+# %ProgramData%\PGW\config\project.yaml (Windows), or point PGW_CONFIG at it.
+
+gateway:
+  name: PGW-01
+  log_level: INFO
+  persist_last_values: false
+
+sources:
+  - name: ctp_12
+    driver: modbus_tcp_client
+    host: 192.168.10.21
+    port: 502
+    unit_id: 1
+    timeout_ms: 1000
+    retries: 2
+    scan_rate_ms: 1000
+    word_order: CDAB
+    tags:
+      - {name: T1_supply, area: HR, address: 100, type: float32, units: "°C"}
+      - {name: P1_supply, area: HR, address: 102, type: float32, units: "MPa"}
+      - {name: pump1_run, area: DI, address: 10, type: bool}
+      - {name: setpoint,  area: HR, address: 104, type: float32, access: RW, write_min: 0, write_max: 100}
+
+  - name: plc_main
+    driver: opcua_client
+    endpoint: "opc.tcp://192.168.10.50:4840"
+    security: {policy: Basic256Sha256, mode: SignAndEncrypt, auth: username, username: scada, password_env: PLC_MAIN_PASSWORD}
+    subscription: {publishing_interval_ms: 500, deadband: {value: 0.5}}
+    tags:
+      - {name: flow_total, node_id: "ns=2;s=Device1.FlowTotal", type: float64}
+      - {name: alarm_word, node_id: "ns=2;i=1057", type: uint16}
+
+outputs:
+  - name: scada_slave
+    interface: modbus_tcp_server
+    bind: 0.0.0.0
+    port: 502
+    max_connections: 16
+    read_only: false
+    map:
+      - {tag: ctp_12.T1_supply,   unit_id: 1, area: HR, address: 0, type: float32, on_bad: hold}
+      - {tag: ctp_12.P1_supply,   unit_id: 1, area: HR, address: 2, type: float32, on_bad: hold}
+      - {tag: ctp_12.pump1_run,   unit_id: 1, area: DI, address: 0, type: bool}
+      - {tag: ctp_12.setpoint,    unit_id: 1, area: HR, address: 4, type: float32, rw: true}
+      - {tag: plc_main.flow_total, unit_id: 2, area: HR, address: 0, type: float64}
