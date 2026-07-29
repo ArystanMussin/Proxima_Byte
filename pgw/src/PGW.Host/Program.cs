@@ -1,7 +1,9 @@
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Hosting.Systemd;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using PGW.Core;
 using PGW.Drivers.Modbus;
+using PGW.Drivers.OpcUa;
 using PGW.Host;
 using Serilog;
 
@@ -91,6 +93,40 @@ app.MapGet("/config/outputs/{name}/map", (string name) =>
     return Results.Text(RegisterMapBuilder.ExportCsv(map), "text/csv");
 });
 
+app.MapPost("/config/opcua/browse", async (OpcUaBrowseRequest req) =>
+{
+    string endpointUrl, certsPath;
+    bool useSecurity, autoAccept;
+
+    if (!string.IsNullOrEmpty(req.Source))
+    {
+        var src = gatewayEngine.Config.Sources.FirstOrDefault(s => s.Name == req.Source && s.Driver == OpcUaSourceFactory.TypeId);
+        if (src is null) return Results.NotFound(new { error = $"unknown opcua_client source '{req.Source}'" });
+        (endpointUrl, useSecurity, certsPath, autoAccept) = OpcUaSourceFactory.ResolveBrowseParams(src, paths);
+    }
+    else if (!string.IsNullOrEmpty(req.Endpoint))
+    {
+        endpointUrl = req.Endpoint;
+        useSecurity = req.UseSecurity ?? false;
+        certsPath = Path.Combine(paths.DataDir, "certs", "_browse");
+        autoAccept = req.Autoaccept ?? false;
+    }
+    else
+    {
+        return Results.BadRequest(new { error = "provide either 'source' (an existing opcua_client source name) or 'endpoint'" });
+    }
+
+    try
+    {
+        var nodes = await OpcUaBrowser.BrowseAsync(endpointUrl, useSecurity, req.NodeId, certsPath, autoAccept, CancellationToken.None);
+        return Results.Ok(nodes);
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.MapGet("/runtime/tags", (string? prefix) =>
 {
     var all = gatewayEngine.TagSpace.GetAll();
@@ -143,3 +179,11 @@ static object ToApiTag(TagSnapshot t) => new
     units = t.Definition.Units,
     access = t.Definition.Access.ToString(),
 };
+
+/// <summary>Either browse an already-configured `opcua_client` source, or connect ad-hoc via `endpoint`.</summary>
+public sealed record OpcUaBrowseRequest(
+    string? Source,
+    string? Endpoint,
+    [property: JsonPropertyName("node_id")] string? NodeId,
+    [property: JsonPropertyName("use_security")] bool? UseSecurity,
+    bool? Autoaccept);

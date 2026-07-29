@@ -43,7 +43,7 @@ public sealed class OpcUaClientDriver : IProtocolDriver
         _device = device;
         try
         {
-            var appConfig = await BuildApplicationConfigurationAsync(device.Device, ct);
+            var appConfig = await OpcUaAppConfig.BuildAsync(device.Device, _cfg.CertsPath, _cfg.AutoAcceptUntrustedCertificates, ct);
             var useSecurity = _cfg.SecurityMode != "None";
             var endpoint = await Task.Run(() => CoreClientUtils.SelectEndpoint(appConfig, _cfg.EndpointUrl, useSecurity), ct);
             var configuredEndpoint = new ConfiguredEndpoint(null, endpoint, EndpointConfiguration.Create(appConfig));
@@ -67,28 +67,6 @@ public sealed class OpcUaClientDriver : IProtocolDriver
             _log.Add(device.ToString(), $"connect failed: {ex.Message}", "ERROR");
             return DriverConnectResult.Failure(ex.Message);
         }
-    }
-
-    /// <summary>File-based certificate trust model per §5.1: certs/own, certs/trusted, certs/rejected under the device's cert path.</summary>
-    private async Task<ApplicationConfiguration> BuildApplicationConfigurationAsync(string deviceName, CancellationToken ct)
-    {
-        var app = new ApplicationInstance
-        {
-            ApplicationName = $"PGW-{deviceName}",
-            ApplicationType = ApplicationType.Client,
-        };
-
-        var config = await app.Build($"urn:{Environment.MachineName}:pgw:{deviceName}", "uri:pgw:gateway")
-            .AsClient()
-            .AddSecurityConfiguration($"CN=PGW-{deviceName}, O=PGW", _cfg.CertsPath)
-            .SetAutoAcceptUntrustedCertificates(_cfg.AutoAcceptUntrustedCertificates)
-            .SetRejectSHA1SignedCertificates(false)
-            .SetMinimumCertificateKeySize(1024)
-            .CreateAsync(ct);
-
-        app.ApplicationConfiguration = config;
-        await app.CheckApplicationInstanceCertificatesAsync(false, null, ct);
-        return config;
     }
 
     public async Task DisconnectAsync(DeviceHandle device, CancellationToken ct)

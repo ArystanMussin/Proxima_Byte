@@ -78,5 +78,16 @@ public static class OpcUaSourceFactory
         return (driver, device, defs);
     }
 
+    /// <summary>Pulls just what `POST /config/opcua/browse` needs out of an already-configured source (§14.2).</summary>
+    public static (string EndpointUrl, bool UseSecurity, string CertsPath, bool AutoAccept) ResolveBrowseParams(SourceConfig src, IPathProvider paths)
+    {
+        var security = src.Settings.GetMap("security") ?? new();
+        return (
+            src.Settings.GetStr("endpoint"),
+            security.GetStr("mode", "None") != "None",
+            Path.Combine(paths.DataDir, "certs", src.Name),
+            security.GetBool("autoaccept"));
+    }
+
     private static string? OrNull(string s) => s.Length == 0 ? null : s;
 }
