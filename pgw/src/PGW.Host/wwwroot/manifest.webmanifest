@@ -1,0 +1,10 @@
+{
+  "name": "PGW — Protocol Gateway",
+  "short_name": "PGW",
+  "description": "Modbus TCP / OPC UA protocol gateway — live tags, diagnostics, event log",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12181f",
+  "theme_color": "#12181f",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

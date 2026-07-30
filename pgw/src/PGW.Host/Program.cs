@@ -64,6 +64,10 @@ builder.Services.AddHostedService<GatewayHostedService>();
 
 var app = builder.Build();
 
+// Static dashboard (wwwroot/) — same Kestrel instance, same REST API, no separate app or build step.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 var apiToken = Environment.GetEnvironmentVariable("PGW_API_TOKEN");
 app.Use(async (ctx, next) =>
 {

@@ -20,7 +20,8 @@ OPC UA Client     ───┘   (value+quality     └── (REST /runtime, /c
 src/PGW.Core            — Tag Space, контракты, конфиг, YAML-загрузчик, cross-platform пути
 src/PGW.Drivers.Modbus   — Modbus TCP Client (master) + Modbus TCP Server (slave)
 src/PGW.Drivers.OpcUa    — OPC UA Client
-src/PGW.Host             — composition root: DI-сборка драйверов/интерфейсов, REST API, Worker Service
+src/PGW.Host             — composition root: DI-сборка драйверов/интерфейсов, REST API, Worker Service,
+                           wwwroot/ — веб-панель (см. "Веб-панель" ниже)
 tests/PGW.Core.Tests     — unit- и end-to-end тесты (реальные TCP-сокеты, без моков протокола)
 deploy/                  — systemd unit, Dockerfile
 project.sample.yaml      — пример конфигурации (§7.2)
@@ -74,6 +75,21 @@ dotnet test PGW.sln
 `/config/*` и `/runtime/reload` требуют `Authorization: Bearer $PGW_API_TOKEN`, если эта переменная
 окружения задана; `/runtime/*` остаётся открытым (см. §14.2). Kestrel слушает `127.0.0.1:8080` по
 умолчанию, адрес — `PGW_API_URL`.
+
+## Веб-панель
+
+Тот же процесс, тот же порт, та же база — отдельного сервера или сборки не требуется. Открой
+`http://<адрес>:8080/` в браузере: статус шлюза, здоровье источников/выходов, таблица тегов с
+фильтром и live-обновлением (~1.5 с), журнал событий. Чистый HTML/CSS/JS без сборки и зависимостей
+(`src/PGW.Host/wwwroot`), поверх уже существующего REST API — никакого отдельного бэкенда для UI.
+
+- **Доступ по IP в сети**: по умолчанию Kestrel слушает только `127.0.0.1` (§10, безопасность по
+  умолчанию). Чтобы открыть с другого устройства в сети — `PGW_API_URL=http://0.0.0.0:8080` (или
+  конкретный IP хоста) при запуске.
+- **Как приложение на рабочем столе**: в Chrome/Edge — значок установки в адресной строке или меню
+  → «Установить PGW» (это PWA, `manifest.webmanifest` уже подключен). Получится окно без адресной
+  строки, с иконкой в панели задач — но данные оттуда идут из того же самого запущенного PGW.Host,
+  никакой отдельной desktop-сборки нет и не нужно.
 
 ## Диагностика
 

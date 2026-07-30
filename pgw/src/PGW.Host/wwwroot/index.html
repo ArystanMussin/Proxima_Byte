@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PGW — Protocol Gateway</title>
+  <meta name="theme-color" content="#12181f">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <img src="/icon.svg" alt="">
+    <h1 id="gw-name">PGW</h1>
+    <div class="meta"><span id="conn-dot" class="dot good"></span><span id="gw-meta">connecting…</span></div>
+  </header>
+
+  <main>
+    <div class="sidebar">
+      <div class="panel">
+        <h2>Sources</h2>
+        <div id="sources-list"><div class="empty">loading…</div></div>
+      </div>
+      <div class="panel">
+        <h2>Outputs</h2>
+        <div id="outputs-list"><div class="empty">loading…</div></div>
+      </div>
+      <div class="panel">
+        <h2>Event log</h2>
+        <div id="log-list" class="log-list"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Tags</h2>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="filter tags…">
+      </div>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Value</th><th>Quality</th><th>Access</th><th>Updated</th></tr>
+        </thead>
+        <tbody id="tags-body"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
