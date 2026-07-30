@@ -16,6 +16,7 @@
     <nav class="tabs">
       <button class="tab-btn active" data-view="monitor">Monitor</button>
       <button class="tab-btn" data-view="config">Config</button>
+      <button class="tab-btn" data-view="scanner">Modbus Tool</button>
     </nav>
     <div class="meta"><span id="conn-dot" class="dot good"></span><span id="gw-meta">connecting…</span></div>
   </header>
@@ -63,6 +64,34 @@
     <div class="panel span-2">
       <h2>Outputs <button class="add-btn" id="add-output-btn">+ выход</button></h2>
       <div id="cfg-outputs"><div class="empty">loading…</div></div>
+    </div>
+  </main>
+
+  <main id="view-scanner" hidden>
+    <div class="panel span-2">
+      <h2>Modbus-сканер</h2>
+      <div class="scan-form">
+        <div class="field"><label>Host</label><input id="sc-host" type="text" placeholder="127.0.0.1"></div>
+        <div class="field"><label>Port</label><input id="sc-port" type="number" value="502"></div>
+        <div class="field"><label>Unit Id</label><input id="sc-unit" type="number" value="1"></div>
+        <div class="field"><label>Область</label><select id="sc-area"></select></div>
+        <div class="field"><label>Адрес</label><input id="sc-address" type="number" value="0"></div>
+        <div class="field"><label>Длина</label><input id="sc-length" type="number" value="10"></div>
+        <div class="field" id="sc-type-field"><label>Тип</label><select id="sc-type"></select></div>
+        <div class="field" id="sc-order-field"><label>Word order</label><select id="sc-order"></select></div>
+        <div class="field"><label>Опрос, мс</label><input id="sc-interval" type="number" value="1000"></div>
+      </div>
+      <div class="scan-actions">
+        <button class="add-btn" id="sc-start">▶ Опрос</button>
+        <button class="add-btn" id="sc-stop" hidden>■ Стоп</button>
+        <button class="icon-btn" id="sc-once">Читать один раз</button>
+        <button class="icon-btn" id="sc-disconnect">Отключить</button>
+        <span class="scan-status" id="sc-status"></span>
+      </div>
+      <table>
+        <thead><tr><th>Адрес</th><th>HEX</th><th>BIN</th><th>Значение</th><th></th></tr></thead>
+        <tbody id="sc-body"><tr><td colspan="5" class="empty">нет данных — заполни адрес устройства и нажми «Опрос»</td></tr></tbody>
+      </table>
     </div>
   </main>
 

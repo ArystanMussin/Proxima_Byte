@@ -133,7 +133,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     const view = btn.dataset.view;
     $("#view-monitor").hidden = view !== "monitor";
     $("#view-config").hidden = view !== "config";
+    $("#view-scanner").hidden = view !== "scanner";
     if (view === "config") loadConfig();
+    if (view !== "scanner") stopScan();
   });
 });
 
@@ -472,3 +474,148 @@ function deleteMapEntry(output, entry) {
   if (!confirm(`Удалить запись карты «${entry.tag}»?`)) return;
   api("DELETE", `/config/outputs/${encodeURIComponent(output.name)}/map/${encodeURIComponent(entry.tag)}`).then(loadConfig);
 }
+
+// ============================================================================================
+// Modbus scanner — a built-in ModScan: read/write any device by IP:port, independent of
+// project.yaml. Talks to /tools/modbus/*, which pools one TCP connection per host:port on the
+// server side so a 1x/sec poll from here doesn't reopen a socket every tick.
+// ============================================================================================
+
+const SCAN_AREA_OPTIONS = [
+  { value: "HR", label: "Holding Register (HR) — R/W" },
+  { value: "IR", label: "Input Register (IR) — RO" },
+  { value: "CO", label: "Coil (CO) — R/W" },
+  { value: "DI", label: "Discrete Input (DI) — RO" },
+];
+const WORD_ORDER_OPTIONS = ["ABCD", "CDAB", "BADC", "DCBA"];
+const NUMERIC_TYPES = ["int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"];
+
+let scanTimer = null;
+
+async function postJson(url, body) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function isBitArea(area) { return area === "CO" || area === "DI"; }
+
+function initScanner() {
+  $("#sc-area").innerHTML = SCAN_AREA_OPTIONS.map((o) => `<option value="${o.value}">${esc(o.label)}</option>`).join("");
+  $("#sc-type").innerHTML = TYPE_OPTIONS.filter((o) => o.value !== "bool" && o.value !== "string")
+    .map((o) => `<option value="${o.value}">${esc(o.label)}</option>`).join("");
+  $("#sc-order").innerHTML = WORD_ORDER_OPTIONS.map((o) => `<option value="${o}">${o}</option>`).join("");
+
+  $("#sc-area").addEventListener("change", () => {
+    const bit = isBitArea($("#sc-area").value);
+    $("#sc-type-field").hidden = bit;
+    $("#sc-order-field").hidden = bit;
+  });
+}
+
+function scanTarget() {
+  return {
+    host: $("#sc-host").value.trim(),
+    port: Number($("#sc-port").value) || 502,
+    unit_id: Number($("#sc-unit").value) || 1,
+    area: $("#sc-area").value,
+    address: Number($("#sc-address").value) || 0,
+    length: Number($("#sc-length").value) || 1,
+    type: $("#sc-type").value,
+    word_order: $("#sc-order").value,
+  };
+}
+
+function setScanStatus(ok, text) {
+  $("#sc-status").innerHTML = `<span class="dot ${ok ? "good" : "bad"}"></span>${esc(text)}`;
+}
+
+async function scanOnce() {
+  const target = scanTarget();
+  if (!target.host) { setScanStatus(false, "укажи host"); return; }
+  try {
+    const res = await postJson("/tools/modbus/read", target);
+    if (!res.ok) {
+      // Leave the last-known rows on screen (a live PLC/pooled connection can hiccup transiently and
+      // recover next tick) but mark them stale, so a failed read is never mistaken for "value didn't
+      // change" — that would be actively misleading right after a write.
+      $("#sc-body").classList.add("stale");
+      setScanStatus(false, res.error);
+      return;
+    }
+    $("#sc-body").classList.remove("stale");
+    renderScanRows(target, res.rows);
+    setScanStatus(true, `${res.latency_ms} мс · ${res.rows.length} значений`);
+  } catch (err) {
+    $("#sc-body").classList.add("stale");
+    setScanStatus(false, err.message || String(err));
+  }
+}
+
+function renderScanRows(target, rows) {
+  const tbody = $("#sc-body");
+  tbody.innerHTML = "";
+  if (rows.length === 0) { tbody.innerHTML = `<tr><td colspan="5" class="empty">нет данных</td></tr>`; return; }
+  const writable = target.area === "HR" || target.area === "CO";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="id">${r.address}</td>
+      <td class="value">${esc(r.hex)}</td>
+      <td class="value">${esc(r.binary)}</td>
+      <td class="value">${esc(fmtValue(r.value))}</td>
+      <td>${writable ? `<button class="icon-btn" title="записать">✎</button>` : ""}</td>`;
+    if (writable) tr.querySelector(".icon-btn").addEventListener("click", () => openScanWriteForm(target, r));
+    tbody.appendChild(tr);
+  }
+}
+
+function openScanWriteForm(target, row) {
+  const isBit = target.area === "CO";
+  const fields = isBit
+    ? [{ key: "value", label: `Значение — адрес ${row.address} (coil)`, type: "select",
+         options: [{ value: "true", label: "1 / ON" }, { value: "false", label: "0 / OFF" }] }]
+    : [{ key: "value", label: `Значение — адрес ${row.address} (${target.type})`, type: "text" }];
+  const initial = { value: isBit ? String(Boolean(row.value)) : row.value };
+
+  openForm(`Запись: ${target.area}:${row.address}`, fields, initial, async (payload) => {
+    let value = payload.value;
+    if (isBit) value = value === "true" || value === true;
+    else if (NUMERIC_TYPES.includes(target.type)) value = Number(value);
+
+    const res = await postJson("/tools/modbus/write", {
+      host: target.host, port: target.port, unit_id: target.unit_id, area: target.area,
+      address: row.address, type: target.type, word_order: target.word_order, value,
+    });
+    if (!res.ok) throw new Error(res.error);
+    await scanOnce();
+  });
+}
+
+function stopScan() {
+  if (!scanTimer) return;
+  clearInterval(scanTimer);
+  scanTimer = null;
+  $("#sc-start").hidden = false;
+  $("#sc-stop").hidden = true;
+}
+
+initScanner();
+
+$("#sc-start").addEventListener("click", () => {
+  const ms = Math.max(200, Number($("#sc-interval").value) || 1000);
+  scanOnce();
+  scanTimer = setInterval(scanOnce, ms);
+  $("#sc-start").hidden = true;
+  $("#sc-stop").hidden = false;
+});
+$("#sc-stop").addEventListener("click", stopScan);
+$("#sc-once").addEventListener("click", scanOnce);
+$("#sc-disconnect").addEventListener("click", async () => {
+  stopScan();
+  const host = $("#sc-host").value.trim();
+  if (host) await postJson("/tools/modbus/close", { host, port: Number($("#sc-port").value) || 502 }).catch(() => {});
+  setScanStatus(true, "отключено");
+  $("#sc-body").innerHTML = `<tr><td colspan="5" class="empty">нет данных — заполни адрес устройства и нажми «Опрос»</td></tr>`;
+});

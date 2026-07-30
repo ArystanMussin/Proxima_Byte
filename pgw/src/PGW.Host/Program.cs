@@ -99,7 +99,9 @@ app.UseStaticFiles();
 var apiToken = Environment.GetEnvironmentVariable("PGW_API_TOKEN");
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/config") || ctx.Request.Path.StartsWithSegments("/runtime/reload"))
+    // /tools/* can read and write arbitrary devices, so it sits behind the same token as /config/*.
+    if (ctx.Request.Path.StartsWithSegments("/config") || ctx.Request.Path.StartsWithSegments("/tools")
+        || ctx.Request.Path.StartsWithSegments("/runtime/reload"))
     {
         gatewayEngine.ApiLog.Add(ctx.Connection.RemoteIpAddress?.ToString() ?? "?", $"{ctx.Request.Method} {ctx.Request.Path}");
         if (!string.IsNullOrEmpty(apiToken) && ctx.Request.Headers.Authorization != $"Bearer {apiToken}")
@@ -195,6 +197,53 @@ app.MapPost("/config/opcua/browse", async (OpcUaBrowseRequest req) =>
     }
 });
 
+// ---- Built-in Modbus scanner (§ diagnostics): poll/write any device, independent of the config ----
+var scanner = new ModbusScanner();
+app.Lifetime.ApplicationStopping.Register(scanner.Dispose);
+
+app.MapPost("/tools/modbus/read", async (ModbusScanRequest req, CancellationToken ct) =>
+{
+    ScanTarget target;
+    try { target = req.ToTarget(); }
+    catch (Exception ex) { return Results.BadRequest(new { ok = false, error = ex.Message }); }
+
+    var result = await scanner.ReadAsync(target, ct);
+    return Results.Ok(new
+    {
+        ok = result.Ok,
+        error = result.Error,
+        latency_ms = Math.Round(result.LatencyMs, 2),
+        rows = result.Rows.Select(r => new { address = r.Address, raw = r.Raw, value = r.Value, hex = r.Hex, binary = r.Binary }),
+    });
+});
+
+app.MapPost("/tools/modbus/write", async (ModbusWriteRequest req, CancellationToken ct) =>
+{
+    ModbusArea area;
+    TagDataType type;
+    WordOrder order;
+    try
+    {
+        area = ModbusScanRequest.ParseArea(req.Area);
+        type = ModbusScanRequest.ParseType(req.Type);
+        order = ModbusSourceFactory.ParseWordOrder(req.WordOrder, WordOrder.ABCD);
+    }
+    catch (Exception ex) { return Results.BadRequest(new { ok = false, error = ex.Message }); }
+
+    // Value arrives as a boxed JsonElement from minimal-API model binding, which Convert.To*() can't
+    // read directly (it doesn't implement IConvertible) — unbox it to a plain CLR type first.
+    var value = JsonUnbox.ToPlain(req.Value);
+    var result = await scanner.WriteAsync(req.Host, req.Port ?? 502, (byte)(req.UnitId ?? 1), area, (ushort)req.Address,
+        type, order, value, req.TimeoutMs ?? 1000, ct);
+    return Results.Ok(new { ok = result.Ok, error = result.Error, latency_ms = Math.Round(result.LatencyMs, 2) });
+});
+
+app.MapPost("/tools/modbus/close", (ModbusCloseRequest req) =>
+{
+    scanner.Close(req.Host, req.Port ?? 502);
+    return Results.Ok(new { ok = true });
+});
+
 app.MapGet("/runtime/tags", (string? prefix) =>
 {
     var all = gatewayEngine.TagSpace.GetAll();
@@ -250,6 +299,64 @@ static object ToApiTag(TagSnapshot t) => new
     units = t.Definition.Units,
     access = t.Definition.Access.ToString(),
 };
+
+/// <summary>One poll of the built-in Modbus scanner. Everything but `host` and `address` has a default.</summary>
+public sealed record ModbusScanRequest(
+    string Host,
+    int? Port,
+    [property: JsonPropertyName("unit_id")] int? UnitId,
+    string? Area,
+    int? Address,
+    int? Length,
+    string? Type,
+    [property: JsonPropertyName("word_order")] string? WordOrder,
+    [property: JsonPropertyName("timeout_ms")] int? TimeoutMs)
+{
+    public ScanTarget ToTarget()
+    {
+        if (string.IsNullOrWhiteSpace(Host)) throw new ArgumentException("host is required");
+        var area = ParseArea(Area);
+        var type = ParseType(Type);
+        var length = Length ?? 1;
+
+        var max = ModbusScanner.IsBitArea(area) ? ModbusScanner.MaxBits : ModbusScanner.MaxRegisters;
+        if (length < 1 || length > max)
+            throw new ArgumentException($"length must be 1..{max} for area {area}");
+
+        var address = Address ?? 0;
+        if (address is < 0 or > 65535) throw new ArgumentException("address must be 0..65535");
+
+        return new ScanTarget(Host, Port ?? 502, (byte)(UnitId ?? 1), area, (ushort)address, length, type,
+            ModbusSourceFactory.ParseWordOrder(WordOrder, PGW.Drivers.Modbus.WordOrder.ABCD), TimeoutMs ?? 1000);
+    }
+
+    public static ModbusArea ParseArea(string? area) => (area ?? "HR").ToUpperInvariant() switch
+    {
+        "HR" or "HOLDING" => ModbusArea.HoldingRegister,
+        "IR" or "INPUT" => ModbusArea.InputRegister,
+        "CO" or "COIL" or "COILS" => ModbusArea.Coil,
+        "DI" or "DISCRETE" => ModbusArea.DiscreteInput,
+        var s => throw new ArgumentException($"unknown area '{s}' (use HR, IR, CO or DI)"),
+    };
+
+    public static TagDataType ParseType(string? type) =>
+        Enum.TryParse<TagDataType>(type ?? "uint16", ignoreCase: true, out var t)
+            ? t
+            : throw new ArgumentException($"unknown type '{type}'");
+}
+
+public sealed record ModbusWriteRequest(
+    string Host,
+    int? Port,
+    [property: JsonPropertyName("unit_id")] int? UnitId,
+    string? Area,
+    int Address,
+    string? Type,
+    [property: JsonPropertyName("word_order")] string? WordOrder,
+    object? Value,
+    [property: JsonPropertyName("timeout_ms")] int? TimeoutMs);
+
+public sealed record ModbusCloseRequest(string Host, int? Port);
 
 /// <summary>Either browse an already-configured `opcua_client` source, or connect ad-hoc via `endpoint`.</summary>
 public sealed record OpcUaBrowseRequest(
