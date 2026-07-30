@@ -42,6 +42,22 @@ dotnet run --project src/PGW.Host -- validate      # проверить конф
 dotnet run --project src/PGW.Host -- export-map     # выгрузить карту регистров в CSV
 ```
 
+## Быстрый просмотр без реального оборудования
+
+`demo/` — готовый стенд: симулированный Modbus-PLC + конфиг под него, чтобы увидеть панель с живыми
+данными сразу после `git clone`, без настройки настоящих устройств. Два терминала:
+
+```bash
+# терминал 1 — симулированный PLC на 127.0.0.1:15020
+dotnet run --project demo/SimulatedPlc
+
+# терминал 2 — сам шлюз с демо-конфигом
+cd src/PGW.Host
+PGW_CONFIG=../../demo/project.yaml dotnet run          # Windows PowerShell: $env:PGW_CONFIG="..\..\demo\project.yaml"; dotnet run
+```
+
+Открой `http://localhost:8080/` — значения `T1_supply`/`P1_supply` будут меняться каждые ~0.7 с.
+
 Тесты (включают реальный Modbus round-trip через loopback-сокеты, не моки):
 
 ```bash

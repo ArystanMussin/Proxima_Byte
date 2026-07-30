@@ -1,0 +1,28 @@
+# Demo config for `demo/SimulatedPlc` — see README "Быстрый просмотр".
+gateway:
+  name: PGW-Demo
+
+sources:
+  - name: ctp_12
+    driver: modbus_tcp_client
+    host: 127.0.0.1
+    port: 15020
+    unit_id: 1
+    scan_rate_ms: 500
+    tags:
+      - {name: T1_supply, area: HR, address: 100, type: uint16, units: "°C"}
+      - {name: P1_supply, area: HR, address: 102, type: uint16, units: "kPa"}
+      - {name: setpoint,  area: HR, address: 104, type: uint16, access: RW, units: "°C"}
+      - {name: pump1_run, area: DI, address: 0, type: bool}
+
+outputs:
+  - name: scada_slave
+    interface: modbus_tcp_server
+    bind: 127.0.0.1
+    port: 15021
+    read_only: false
+    map:
+      - {tag: ctp_12.T1_supply, unit_id: 1, area: HR, address: 0, type: uint16}
+      - {tag: ctp_12.P1_supply, unit_id: 1, area: HR, address: 2, type: uint16}
+      - {tag: ctp_12.setpoint,  unit_id: 1, area: HR, address: 4, type: uint16, rw: true}
+      - {tag: ctp_12.pump1_run, unit_id: 1, area: DI, address: 0, type: bool}
