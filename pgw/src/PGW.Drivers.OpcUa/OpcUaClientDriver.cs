@@ -81,7 +81,18 @@ public sealed class OpcUaClientDriver : IProtocolDriver
     public async Task StartPollingAsync(DeviceHandle device, ITagSink sink, CancellationToken ct)
     {
         _sink = sink;
-        if (_session is null) throw new InvalidOperationException("driver not connected");
+
+        // ConnectAsync already ran once in GatewayEngine.StartAsync; if the server wasn't reachable yet
+        // (e.g. it's still starting up), that single attempt can fail. Unlike the Modbus driver's poll
+        // loop, there was previously no retry here at all, so a slow/late server left the source stuck
+        // on Bad quality forever. Retry with the same backoff used for keep-alive-triggered reconnects.
+        while (_session is null)
+        {
+            var result = await ConnectAsync(device, ct);
+            if (result.Ok) break;
+            await Task.Delay(_reconnectDelayMs, ct);
+            _reconnectDelayMs = Math.Min(_reconnectDelayMs * 2, _cfg.ReconnectMaxMs);
+        }
 
         _subscription = new Subscription
         {
@@ -90,7 +101,7 @@ public sealed class OpcUaClientDriver : IProtocolDriver
             KeepAliveCount = 10,
             LifetimeCount = 100,
         };
-        _session.AddSubscription(_subscription);
+        _session!.AddSubscription(_subscription);
         await _subscription.CreateAsync(ct);
 
         foreach (var (tagId, info) in _tagsById)

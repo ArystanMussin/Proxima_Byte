@@ -58,4 +58,47 @@ public class OpcUaRoundTripTests
         cts.Cancel();
         await driver.DisconnectAsync(device, default);
     }
+
+    [Fact]
+    public async Task OpcUa_Client_Recovers_When_Server_Starts_Late()
+    {
+        var port = TestUtil.GetFreePort();
+        var certsPath = Path.Combine(Path.GetTempPath(), "pgw-test-certs-" + Guid.NewGuid());
+
+        var log = new RingLog();
+        var tags = new Dictionary<string, OpcUaTagInfo>
+        {
+            ["sim.T1_supply"] = new OpcUaTagInfo("ns=1;s=T1_supply", TagDataType.Float64),
+        };
+        var cfg = new OpcUaDeviceSettings(
+            EndpointUrl: $"opc.tcp://127.0.0.1:{port}/pgw/simulator",
+            SecurityMode: "None",
+            PublishingIntervalMs: 200,
+            SamplingIntervalMs: 200,
+            AutoAcceptUntrustedCertificates: true,
+            CertsPath: Path.Combine(certsPath, "client"),
+            ReconnectMinMs: 200,
+            ReconnectMaxMs: 1000);
+
+        var driver = new OpcUaClientDriver(cfg, tags, log);
+        var device = new DeviceHandle("sim", "sim");
+        var tagSpace = new TagSpace();
+        tagSpace.Register(new TagDefinition("sim.T1_supply", TagDataType.Float64, TagAccess.RO, device, "ns=1;s=T1_supply"), driver, new TagAddress(device, "ns=1;s=T1_supply"));
+
+        using var cts = new CancellationTokenSource();
+
+        // Nothing is listening yet — this is the case that used to kill polling permanently.
+        var connect = await driver.ConnectAsync(device, cts.Token);
+        Assert.False(connect.Ok);
+        _ = driver.StartPollingAsync(device, tagSpace, cts.Token);
+
+        using var server = new SimulatedOpcUaServer();
+        await server.StartAsync(port, Path.Combine(certsPath, "server"), default);
+
+        await TestUtil.WaitUntilAsync(() => tagSpace.Get("sim.T1_supply")?.Quality == TagQuality.Good, TimeSpan.FromSeconds(20));
+        Assert.Equal(TagQuality.Good, tagSpace.Get("sim.T1_supply")!.Quality);
+
+        cts.Cancel();
+        await driver.DisconnectAsync(device, default);
+    }
 }

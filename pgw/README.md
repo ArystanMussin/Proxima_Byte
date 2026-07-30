@@ -71,6 +71,29 @@ PGW_CONFIG=../../demo/project.yaml dotnet run          # Windows PowerShell: $en
 Открой `http://localhost:8420/` — увидишь оба источника (`ctp_12` по Modbus, `plc_opcua` по OPC UA)
 подключёнными, с живыми значениями по обоим протоколам одновременно.
 
+Порядок запуска не важен: если шлюз стартовал раньше симулятора (или устройство временно недоступно),
+оба драйвера переподключаются сами с экспоненциальной паузой — источник поднимется, как только сервер
+станет доступен.
+
+### Подключение SCADA / ModScan32 к выходу шлюза
+
+Выход `scada_slave` из `demo/project.yaml` — это Modbus TCP Server на `127.0.0.1:15021` (не 502 и не
+порт панели). Адреса ниже 0-based, как в поле Address у ModScan32:
+
+| Тег | Unit Id | Point Type | Address | Length |
+|---|---|---|---|---|
+| `ctp_12.T1_supply` | 1 | 03 Holding Register | 0 | 1 |
+| `ctp_12.P1_supply` | 1 | 03 Holding Register | 2 | 1 |
+| `ctp_12.setpoint` (RW) | 1 | 03 Holding Register | 4 | 1 |
+| `ctp_12.pump1_run` | 1 | 02 Input Status | 0 | 1 |
+| `plc_opcua.T1_supply` | 2 | 03 Holding Register | 0 | 4 |
+| `plc_opcua.P1_supply` | 2 | 03 Holding Register | 4 | 4 |
+| `plc_opcua.setpoint` (RW) | 2 | 03 Holding Register | 8 | 4 |
+| `plc_opcua.pump1_run` | 2 | 02 Input Status | 0 | 1 |
+
+Теги юнита 2 — `float64`, то есть 4 регистра на значение; чтобы клиент показывал одно число, а не
+четыре, выбери в нём формат Double (порядок слов по умолчанию ABCD, старший регистр первый).
+
 Тесты (включают реальный Modbus round-trip через loopback-сокеты, не моки):
 
 ```bash
