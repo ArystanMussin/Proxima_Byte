@@ -18,10 +18,14 @@ public sealed class GatewayEngine
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
     public int ConfigVersion { get; private set; }
 
+    private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, OpcUaSourceFactory.TypeId };
+    private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
+
     private readonly IPathProvider _paths;
     private readonly string _configPath;
     private readonly List<(IProtocolDriver Driver, DeviceHandle Device)> _drivers = new();
     private readonly List<(OutputConfig Output, IProtocolInterface Interface)> _interfaces = new();
+    private readonly object _configLock = new();
     private CancellationTokenSource _runCts = new();
     private CancellationToken _hostCt;
 
@@ -34,15 +38,19 @@ public sealed class GatewayEngine
     public List<string> LoadAndValidate()
     {
         var cfg = ConfigLoader.Load(_configPath);
-        var errors = ConfigValidator.Validate(cfg);
+        var errors = ValidateFull(cfg);
+        if (errors.Count == 0) Config = cfg;
+        return errors;
+    }
 
+    private static List<string> ValidateFull(GatewayProjectConfig cfg)
+    {
+        var errors = ConfigValidator.Validate(cfg);
         foreach (var o in cfg.Outputs.Where(o => o.Interface == ModbusOutputFactory.TypeId))
         {
             var wo = ModbusSourceFactory.ParseWordOrder(o.Settings.GetStr("word_order"), WordOrder.ABCD);
             errors.AddRange(RegisterMapBuilder.Build(o, wo).Errors);
         }
-
-        if (errors.Count == 0) Config = cfg;
         return errors;
     }
 
@@ -124,6 +132,122 @@ public sealed class GatewayEngine
         await StopAsync();
         await StartAsync(_hostCt);
         return errors;
+    }
+
+    // ---- Config editing (§14.2 write side) ----------------------------------------------------
+    // Each call mutates Config in place and persists to disk immediately; it does NOT restart drivers
+    // or interfaces on its own — the caller (dashboard) batches edits and calls ReloadAsync explicitly,
+    // so ten tag edits don't mean ten reconnects.
+
+    public (bool Applied, List<string> Errors) UpsertSource(Dictionary<string, object?> raw)
+    {
+        lock (_configLock)
+        {
+            var src = ConfigLoader.ParseSource(JsonUnbox.ToPlainDict(raw));
+            if (string.IsNullOrWhiteSpace(src.Name)) return (false, new() { "source requires 'name'" });
+            if (!KnownDrivers.Contains(src.Driver))
+                return (false, new() { $"unknown driver '{src.Driver}' (expected: {string.Join(", ", KnownDrivers)})" });
+
+            var idx = Config.Sources.FindIndex(s => s.Name == src.Name);
+            if (idx >= 0) Config.Sources[idx] = src; else Config.Sources.Add(src);
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) RemoveSource(string name)
+    {
+        lock (_configLock)
+        {
+            if (Config.Sources.RemoveAll(s => s.Name == name) == 0) return (false, new() { $"unknown source '{name}'" });
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) UpsertTag(string sourceName, Dictionary<string, object?> raw)
+    {
+        lock (_configLock)
+        {
+            var src = Config.Sources.FirstOrDefault(s => s.Name == sourceName);
+            if (src is null) return (false, new() { $"unknown source '{sourceName}'" });
+
+            var tag = JsonUnbox.ToPlainDict(raw);
+            var tagName = tag.GetStr("name");
+            if (string.IsNullOrWhiteSpace(tagName)) return (false, new() { "tag requires 'name'" });
+
+            var idx = src.Tags.FindIndex(t => t.GetStr("name") == tagName);
+            if (idx >= 0) src.Tags[idx] = tag; else src.Tags.Add(tag);
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) RemoveTag(string sourceName, string tagName)
+    {
+        lock (_configLock)
+        {
+            var src = Config.Sources.FirstOrDefault(s => s.Name == sourceName);
+            if (src is null) return (false, new() { $"unknown source '{sourceName}'" });
+            if (src.Tags.RemoveAll(t => t.GetStr("name") == tagName) == 0) return (false, new() { $"unknown tag '{tagName}'" });
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) UpsertOutput(Dictionary<string, object?> raw)
+    {
+        lock (_configLock)
+        {
+            var output = ConfigLoader.ParseOutput(JsonUnbox.ToPlainDict(raw));
+            if (string.IsNullOrWhiteSpace(output.Name)) return (false, new() { "output requires 'name'" });
+            if (!KnownInterfaces.Contains(output.Interface))
+                return (false, new() { $"unknown interface '{output.Interface}' (expected: {string.Join(", ", KnownInterfaces)})" });
+
+            var idx = Config.Outputs.FindIndex(o => o.Name == output.Name);
+            if (idx >= 0) Config.Outputs[idx] = output; else Config.Outputs.Add(output);
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) RemoveOutput(string name)
+    {
+        lock (_configLock)
+        {
+            if (Config.Outputs.RemoveAll(o => o.Name == name) == 0) return (false, new() { $"unknown output '{name}'" });
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) UpsertMapEntry(string outputName, Dictionary<string, object?> raw)
+    {
+        lock (_configLock)
+        {
+            var output = Config.Outputs.FirstOrDefault(o => o.Name == outputName);
+            if (output is null) return (false, new() { $"unknown output '{outputName}'" });
+
+            var entry = JsonUnbox.ToPlainDict(raw);
+            var tag = entry.GetStr("tag");
+            if (string.IsNullOrWhiteSpace(tag)) return (false, new() { "map entry requires 'tag'" });
+
+            var idx = output.Map.FindIndex(m => m.GetStr("tag") == tag);
+            if (idx >= 0) output.Map[idx] = entry; else output.Map.Add(entry);
+            return Persist();
+        }
+    }
+
+    public (bool Applied, List<string> Errors) RemoveMapEntry(string outputName, string tag)
+    {
+        lock (_configLock)
+        {
+            var output = Config.Outputs.FirstOrDefault(o => o.Name == outputName);
+            if (output is null) return (false, new() { $"unknown output '{outputName}'" });
+            if (output.Map.RemoveAll(m => m.GetStr("tag") == tag) == 0) return (false, new() { $"unknown map entry '{tag}'" });
+            return Persist();
+        }
+    }
+
+    /// <summary>Writes the in-memory config to disk and runs full validation; caller decides whether/when to reload.</summary>
+    private (bool Applied, List<string> Errors) Persist()
+    {
+        ConfigWriter.Save(Config, _configPath);
+        return (true, ValidateFull(Config));
     }
 
     private Task<WriteResult> CoreWriteAsync(string tagId, object? value, CancellationToken ct) =>

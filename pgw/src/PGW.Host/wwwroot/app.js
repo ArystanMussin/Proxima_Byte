@@ -1,6 +1,10 @@
 const $ = (sel) => document.querySelector(sel);
 let filter = "";
 
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 async function getJson(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url}: ${r.status}`);
@@ -52,7 +56,7 @@ function renderSystemGroups(tags) {
       const detail = kind === "sources"
         ? (fields.connected ? "connected" : `errors: ${fields.error_count ?? 0}`)
         : `${fields.client_count ?? 0} client(s) · ${fields.requests_total ?? 0} req`;
-      row.innerHTML = `<span class="dot ${ok ? "good" : "bad"}"></span><span class="name">${name}</span><span class="err">${detail}</span>`;
+      row.innerHTML = `<span class="dot ${ok ? "good" : "bad"}"></span><span class="name">${esc(name)}</span><span class="err">${esc(detail)}</span>`;
       el.appendChild(row);
     }
   };
@@ -72,8 +76,8 @@ function renderTags(tags) {
   for (const t of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="id">${t.id}</td>
-      <td class="value">${fmtValue(t.value)}${t.units ? " " + t.units : ""}</td>
+      <td class="id">${esc(t.id)}</td>
+      <td class="value">${esc(fmtValue(t.value))}${t.units ? " " + esc(t.units) : ""}</td>
       <td><span class="quality ${qualityClass(t.quality)}">● ${t.quality}</span></td>
       <td>${t.access}</td>
       <td>${fmtTime(t.timestamp)}</td>`;
@@ -88,7 +92,7 @@ function renderLog(entries) {
   for (const e of [...entries].reverse()) {
     const row = document.createElement("div");
     row.className = `log-row ${e.level}`;
-    row.innerHTML = `<span class="ts">${fmtTime(e.timestampUtc)}</span><span>[${e.source}] ${e.message}</span>`;
+    row.innerHTML = `<span class="ts">${fmtTime(e.timestampUtc)}</span><span>[${esc(e.source)}] ${esc(e.message)}</span>`;
     el.appendChild(row);
   }
 }
@@ -117,3 +121,354 @@ $("#search").addEventListener("input", (e) => {
 
 tick();
 setInterval(tick, 1500);
+
+// ============================================================================================
+// Tabs
+// ============================================================================================
+
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    const view = btn.dataset.view;
+    $("#view-monitor").hidden = view !== "monitor";
+    $("#view-config").hidden = view !== "config";
+    if (view === "config") loadConfig();
+  });
+});
+
+// ============================================================================================
+// Config editor — add/edit/delete sources, tags, outputs, register-map entries.
+// Every mutation POSTs/PUTs/DELETEs straight to disk (§14.2 write side); it does NOT restart
+// drivers on its own, so ten quick edits don't mean ten reconnects — the banner below batches
+// them behind one explicit Reload.
+// ============================================================================================
+
+let cfgSources = [];
+let cfgOutputs = [];
+
+const TYPE_OPTIONS = ["bool", "int16", "uint16", "int32", "uint32", "int64", "float32", "float64", "string"]
+  .map((t) => ({ value: t, label: t }));
+const AREA_OPTIONS = [
+  { value: "HR", label: "Holding Register (HR)" },
+  { value: "IR", label: "Input Register (IR)" },
+  { value: "DI", label: "Discrete Input (DI)" },
+  { value: "CO", label: "Coil (CO)" },
+];
+const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", opcua_client: "OPC UA" };
+
+async function api(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error([].concat(data.errors ?? data.error ?? res.statusText).join("; "));
+  $("#reload-banner").hidden = false;
+  return data;
+}
+
+$("#reload-btn").addEventListener("click", async () => {
+  await fetch("/runtime/reload", { method: "POST" });
+  $("#reload-banner").hidden = true;
+  await loadConfig();
+  tick();
+});
+
+async function loadConfig() {
+  [cfgSources, cfgOutputs] = await Promise.all([getJson("/config/channels"), getJson("/config/outputs")]);
+  renderCfgSources();
+  renderCfgOutputs();
+}
+
+// Re-rendered from scratch after every edit (simplest correct option), so "expanded" state has to be
+// tracked here rather than left to the DOM, or every add/edit/delete would visibly collapse the panel.
+const openSourceNames = new Set();
+const openOutputNames = new Set();
+
+function toggleEntity(entity, e, name, openSet) {
+  if (e.target.closest("[data-act]")) return;
+  entity.classList.toggle("open");
+  if (entity.classList.contains("open")) openSet.add(name); else openSet.delete(name);
+}
+
+function renderCfgSources() {
+  const el = $("#cfg-sources");
+  el.innerHTML = "";
+  if (cfgSources.length === 0) { el.innerHTML = `<div class="empty">нет источников</div>`; return; }
+
+  for (const s of cfgSources) {
+    const summary = s.driver === "opcua_client"
+      ? (s.settings.endpoint ?? "")
+      : `${s.settings.host ?? "?"}:${s.settings.port ?? "?"} unit ${s.settings.unit_id ?? "1"}`;
+
+    const entity = document.createElement("div");
+    entity.className = "entity" + (openSourceNames.has(s.name) ? " open" : "");
+    entity.innerHTML = `
+      <div class="entity-row">
+        <span class="caret">▶</span>
+        <span class="title">${esc(s.name)}</span>
+        <span class="subtitle">${esc(DRIVER_LABELS[s.driver] ?? s.driver)} · ${esc(summary)} · ${s.tags.length} тег(ов)</span>
+        <span class="actions">
+          <button class="icon-btn" data-act="edit-source" title="изменить">✎</button>
+          <button class="icon-btn danger" data-act="del-source" title="удалить">✕</button>
+        </span>
+      </div>
+      <div class="entity-children">
+        <div class="tags-box"></div>
+        <button class="icon-btn add-child" data-act="add-tag">+ тег</button>
+      </div>`;
+    entity.querySelector(".entity-row").addEventListener("click", (e) => toggleEntity(entity, e, s.name, openSourceNames));
+    entity.querySelector('[data-act="edit-source"]').addEventListener("click", () => editSource(s));
+    entity.querySelector('[data-act="del-source"]').addEventListener("click", () => deleteSource(s));
+    entity.querySelector('[data-act="add-tag"]').addEventListener("click", () => editTag(s, null));
+
+    const tagsBox = entity.querySelector(".tags-box");
+    for (const t of s.tags) {
+      const loc = s.driver === "opcua_client" ? t.node_id : `${t.area}:${t.address}${t.bit != null ? "." + t.bit : ""}`;
+      const row = document.createElement("div");
+      row.className = "child-row";
+      row.innerHTML = `
+        <span class="name">${esc(t.name)}</span>
+        <span class="desc">${esc(t.type)} · ${esc(loc ?? "")}${t.access === "RW" ? " · RW" : ""}</span>
+        <span class="actions">
+          <button class="icon-btn" data-act="edit" title="изменить">✎</button>
+          <button class="icon-btn danger" data-act="del" title="удалить">✕</button>
+        </span>`;
+      row.querySelector('[data-act="edit"]').addEventListener("click", () => editTag(s, t));
+      row.querySelector('[data-act="del"]').addEventListener("click", () => deleteTag(s, t));
+      tagsBox.appendChild(row);
+    }
+    el.appendChild(entity);
+  }
+}
+
+function renderCfgOutputs() {
+  const el = $("#cfg-outputs");
+  el.innerHTML = "";
+  if (cfgOutputs.length === 0) { el.innerHTML = `<div class="empty">нет выходов</div>`; return; }
+
+  for (const o of cfgOutputs) {
+    const entity = document.createElement("div");
+    entity.className = "entity" + (openOutputNames.has(o.name) ? " open" : "");
+    entity.innerHTML = `
+      <div class="entity-row">
+        <span class="caret">▶</span>
+        <span class="title">${esc(o.name)}</span>
+        <span class="subtitle">Modbus TCP Server · ${esc(o.settings.bind ?? "0.0.0.0")}:${esc(o.settings.port ?? "502")} · ${o.map.length} записей карты</span>
+        <span class="actions">
+          <button class="icon-btn" data-act="edit-output" title="изменить">✎</button>
+          <button class="icon-btn danger" data-act="del-output" title="удалить">✕</button>
+        </span>
+      </div>
+      <div class="entity-children">
+        <div class="map-box"></div>
+        <button class="icon-btn add-child" data-act="add-map">+ запись карты</button>
+      </div>`;
+    entity.querySelector(".entity-row").addEventListener("click", (e) => toggleEntity(entity, e, o.name, openOutputNames));
+    entity.querySelector('[data-act="edit-output"]').addEventListener("click", () => editOutput(o));
+    entity.querySelector('[data-act="del-output"]').addEventListener("click", () => deleteOutput(o));
+    entity.querySelector('[data-act="add-map"]').addEventListener("click", () => editMapEntry(o, null));
+
+    const mapBox = entity.querySelector(".map-box");
+    for (const m of o.map) {
+      const row = document.createElement("div");
+      row.className = "child-row";
+      row.innerHTML = `
+        <span class="name">${esc(m.tag)}</span>
+        <span class="desc">unit ${esc(m.unit_id)} · ${esc(m.area)}:${esc(m.address)} · ${esc(m.type)}${m.rw ? " · RW" : ""}</span>
+        <span class="actions">
+          <button class="icon-btn" data-act="edit" title="изменить">✎</button>
+          <button class="icon-btn danger" data-act="del" title="удалить">✕</button>
+        </span>`;
+      row.querySelector('[data-act="edit"]').addEventListener("click", () => editMapEntry(o, m));
+      row.querySelector('[data-act="del"]').addEventListener("click", () => deleteMapEntry(o, m));
+      mapBox.appendChild(row);
+    }
+    el.appendChild(entity);
+  }
+}
+
+// ---- Field specs (kept deliberately flat: both driver's fields shown together, unused ones are
+// simply not sent — far less code than a dynamic show/hide-by-driver form). ----
+
+function sourceFields() {
+  return [
+    { key: "name", label: "Имя источника", type: "text" },
+    { key: "driver", label: "Драйвер", type: "select", options: [
+      { value: "modbus_tcp_client", label: "Modbus TCP Client" },
+      { value: "opcua_client", label: "OPC UA Client" },
+    ] },
+    { key: "host", label: "Host/IP (Modbus)", type: "text" },
+    { key: "port", label: "Port (Modbus)", type: "number" },
+    { key: "unit_id", label: "Unit ID (Modbus)", type: "number" },
+    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus)", type: "number" },
+    { key: "endpoint", label: "Endpoint URL (OPC UA)", type: "text", placeholder: "opc.tcp://host:4840" },
+    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"timeout_ms": 1000, "retries": 2}' },
+  ];
+}
+
+function tagFields() {
+  return [
+    { key: "name", label: "Имя тега", type: "text" },
+    { key: "type", label: "Тип", type: "select", options: TYPE_OPTIONS },
+    { key: "access", label: "Доступ", type: "select", options: [{ value: "RO", label: "RO" }, { value: "RW", label: "RW" }] },
+    { key: "area", label: "Область (Modbus)", type: "select", options: AREA_OPTIONS },
+    { key: "address", label: "Адрес (Modbus)", type: "number" },
+    { key: "node_id", label: "NodeId (OPC UA)", type: "text", placeholder: "ns=2;s=Device.Tag" },
+    { key: "units", label: "Единицы измерения", type: "text" },
+    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
+  ];
+}
+
+function outputFields() {
+  return [
+    { key: "name", label: "Имя выхода", type: "text" },
+    { key: "bind", label: "Bind address", type: "text", placeholder: "0.0.0.0" },
+    { key: "port", label: "Port", type: "number" },
+    { key: "read_only", label: "Только чтение (read_only)", type: "checkbox" },
+    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"max_connections": 16}' },
+  ];
+}
+
+function mapEntryFields() {
+  return [
+    { key: "tag", label: "Tag ID", type: "text", placeholder: "ctp_12.T1_supply" },
+    { key: "unit_id", label: "Unit ID", type: "number" },
+    { key: "area", label: "Область", type: "select", options: AREA_OPTIONS },
+    { key: "address", label: "Адрес", type: "number" },
+    { key: "type", label: "Тип", type: "select", options: TYPE_OPTIONS },
+    { key: "rw", label: "Разрешить запись (rw)", type: "checkbox" },
+    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"on_bad": "hold"}' },
+  ];
+}
+
+// ---- Generic modal form ----
+
+const dialog = $("#form-dialog");
+const formEl = $("#form-el");
+$("#form-cancel").addEventListener("click", () => dialog.close());
+
+function renderField(f, value) {
+  const wrap = document.createElement("div");
+  wrap.className = "field" + (f.type === "checkbox" ? " checkbox" : "");
+  const id = "f_" + f.key;
+  if (f.type === "select") {
+    wrap.innerHTML = `<label for="${id}">${esc(f.label)}</label>
+      <select id="${id}" data-key="${f.key}">${f.options.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join("")}</select>`;
+  } else if (f.type === "textarea") {
+    wrap.innerHTML = `<label for="${id}">${esc(f.label)}</label><textarea id="${id}" data-key="${f.key}" placeholder="${esc(f.placeholder ?? "")}"></textarea>`;
+  } else if (f.type === "checkbox") {
+    wrap.innerHTML = `<input type="checkbox" id="${id}" data-key="${f.key}"><label for="${id}">${esc(f.label)}</label>`;
+  } else {
+    wrap.innerHTML = `<label for="${id}">${esc(f.label)}</label><input type="${f.type}" id="${id}" data-key="${f.key}" placeholder="${esc(f.placeholder ?? "")}">`;
+  }
+  const input = wrap.querySelector("[data-key]");
+  if (value !== undefined && value !== null) {
+    if (f.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value;
+  }
+  return wrap;
+}
+
+function collectForm(fields) {
+  const out = {};
+  for (const f of fields) {
+    if (f.key === "__extra") continue;
+    const input = $(`[data-key="${f.key}"]`);
+    if (f.type === "checkbox") { out[f.key] = input.checked; continue; }
+    const raw = input.value.trim();
+    if (raw === "") continue;
+    out[f.key] = f.type === "number" ? Number(raw) : raw;
+  }
+  const extraInput = document.querySelector('[data-key="__extra"]');
+  if (extraInput && extraInput.value.trim()) {
+    let extra;
+    try { extra = JSON.parse(extraInput.value); }
+    catch { throw new Error("«Доп. поля (JSON)» — некорректный JSON"); }
+    return { ...extra, ...out };
+  }
+  return out;
+}
+
+function openForm(title, fields, values, onSubmit) {
+  $("#form-title").textContent = title;
+  $("#form-error").hidden = true;
+  const box = $("#form-fields");
+  box.innerHTML = "";
+  for (const f of fields) box.appendChild(renderField(f, values?.[f.key]));
+
+  formEl.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const payload = collectForm(fields);
+      await onSubmit(payload);
+      dialog.close();
+    } catch (err) {
+      $("#form-error").textContent = err.message || String(err);
+      $("#form-error").hidden = false;
+    }
+  };
+  dialog.showModal();
+}
+
+// ---- CRUD actions ----
+
+$("#add-source-btn").addEventListener("click", () => editSource(null));
+$("#add-output-btn").addEventListener("click", () => editOutput(null));
+
+function editSource(existing) {
+  const values = existing ? { ...existing, ...existing.settings } : { driver: "modbus_tcp_client" };
+  openForm(existing ? `Источник: ${existing.name}` : "Новый источник", sourceFields(), values, async (payload) => {
+    if (existing) await api("PUT", `/config/channels/${encodeURIComponent(existing.name)}`, payload);
+    else await api("POST", "/config/channels", payload);
+    await loadConfig();
+  });
+}
+
+function deleteSource(s) {
+  if (!confirm(`Удалить источник «${s.name}» и все его теги (${s.tags.length})?`)) return;
+  api("DELETE", `/config/channels/${encodeURIComponent(s.name)}`).then(loadConfig);
+}
+
+function editTag(source, existing) {
+  openForm(existing ? `Тег: ${source.name}.${existing.name}` : `Новый тег в ${source.name}`, tagFields(), existing, async (payload) => {
+    if (existing) await api("PUT", `/config/channels/${encodeURIComponent(source.name)}/tags/${encodeURIComponent(existing.name)}`, payload);
+    else await api("POST", `/config/channels/${encodeURIComponent(source.name)}/tags`, payload);
+    await loadConfig();
+  });
+}
+
+function deleteTag(source, tag) {
+  if (!confirm(`Удалить тег «${tag.name}»?`)) return;
+  api("DELETE", `/config/channels/${encodeURIComponent(source.name)}/tags/${encodeURIComponent(tag.name)}`).then(loadConfig);
+}
+
+function editOutput(existing) {
+  const values = existing ? { ...existing, ...existing.settings } : {};
+  openForm(existing ? `Выход: ${existing.name}` : "Новый выход", outputFields(), values, async (payload) => {
+    payload.interface = "modbus_tcp_server";
+    if (existing) await api("PUT", `/config/outputs/${encodeURIComponent(existing.name)}`, payload);
+    else await api("POST", "/config/outputs", payload);
+    await loadConfig();
+  });
+}
+
+function deleteOutput(o) {
+  if (!confirm(`Удалить выход «${o.name}» и карту регистров (${o.map.length} записей)?`)) return;
+  api("DELETE", `/config/outputs/${encodeURIComponent(o.name)}`).then(loadConfig);
+}
+
+function editMapEntry(output, existing) {
+  openForm(existing ? `Карта: ${existing.tag}` : `Новая запись карты в ${output.name}`, mapEntryFields(), existing, async (payload) => {
+    if (existing) await api("PUT", `/config/outputs/${encodeURIComponent(output.name)}/map/${encodeURIComponent(existing.tag)}`, payload);
+    else await api("POST", `/config/outputs/${encodeURIComponent(output.name)}/map`, payload);
+    await loadConfig();
+  });
+}
+
+function deleteMapEntry(output, entry) {
+  if (!confirm(`Удалить запись карты «${entry.tag}»?`)) return;
+  api("DELETE", `/config/outputs/${encodeURIComponent(output.name)}/map/${encodeURIComponent(entry.tag)}`).then(loadConfig);
+}

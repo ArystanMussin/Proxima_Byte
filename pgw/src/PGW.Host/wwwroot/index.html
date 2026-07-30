@@ -13,10 +13,19 @@
   <header>
     <img src="/icon.svg" alt="">
     <h1 id="gw-name">PGW</h1>
+    <nav class="tabs">
+      <button class="tab-btn active" data-view="monitor">Monitor</button>
+      <button class="tab-btn" data-view="config">Config</button>
+    </nav>
     <div class="meta"><span id="conn-dot" class="dot good"></span><span id="gw-meta">connecting…</span></div>
   </header>
 
-  <main>
+  <div id="reload-banner" class="banner" hidden>
+    Изменения сохранены на диск. Чтобы применить их (переподключить источники/выходы) —
+    <button id="reload-btn">Reload</button>
+  </div>
+
+  <main id="view-monitor">
     <div class="sidebar">
       <div class="panel">
         <h2>Sources</h2>
@@ -45,6 +54,29 @@
       </table>
     </div>
   </main>
+
+  <main id="view-config" hidden>
+    <div class="panel span-2">
+      <h2>Sources <button class="add-btn" id="add-source-btn">+ источник</button></h2>
+      <div id="cfg-sources"><div class="empty">loading…</div></div>
+    </div>
+    <div class="panel span-2">
+      <h2>Outputs <button class="add-btn" id="add-output-btn">+ выход</button></h2>
+      <div id="cfg-outputs"><div class="empty">loading…</div></div>
+    </div>
+  </main>
+
+  <dialog id="form-dialog">
+    <form id="form-el" method="dialog">
+      <h3 id="form-title">Форма</h3>
+      <div id="form-fields"></div>
+      <div class="form-error" id="form-error" hidden></div>
+      <div class="form-actions">
+        <button type="button" id="form-cancel">Отмена</button>
+        <button type="submit" id="form-save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>

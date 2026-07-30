@@ -87,7 +87,36 @@ app.Use(async (ctx, next) =>
 // §14.2 resource schema. /config/* is the static, authenticated, reload-requiring side;
 // /runtime/* is live read-only state, safe to leave open inside a trusted network segment.
 app.MapGet("/config/channels", () => gatewayEngine.Config.Sources.Select(RedactSource));
+app.MapGet("/config/channels/{name}", (string name) =>
+{
+    var s = gatewayEngine.Config.Sources.FirstOrDefault(x => x.Name == name);
+    return s is null ? Results.NotFound() : Results.Ok(RedactSource(s));
+});
+app.MapPost("/config/channels", (Dictionary<string, object?> body) => ApplyResult(gatewayEngine.UpsertSource(body)));
+app.MapPut("/config/channels/{name}", (string name, Dictionary<string, object?> body) =>
+{
+    body["name"] = name;
+    return ApplyResult(gatewayEngine.UpsertSource(body));
+});
+app.MapDelete("/config/channels/{name}", (string name) => ApplyResult(gatewayEngine.RemoveSource(name)));
+
+app.MapPost("/config/channels/{name}/tags", (string name, Dictionary<string, object?> body) => ApplyResult(gatewayEngine.UpsertTag(name, body)));
+app.MapPut("/config/channels/{name}/tags/{tagName}", (string name, string tagName, Dictionary<string, object?> body) =>
+{
+    body["name"] = tagName;
+    return ApplyResult(gatewayEngine.UpsertTag(name, body));
+});
+app.MapDelete("/config/channels/{name}/tags/{tagName}", (string name, string tagName) => ApplyResult(gatewayEngine.RemoveTag(name, tagName)));
+
 app.MapGet("/config/outputs", () => gatewayEngine.Config.Outputs);
+app.MapPost("/config/outputs", (Dictionary<string, object?> body) => ApplyResult(gatewayEngine.UpsertOutput(body)));
+app.MapPut("/config/outputs/{name}", (string name, Dictionary<string, object?> body) =>
+{
+    body["name"] = name;
+    return ApplyResult(gatewayEngine.UpsertOutput(body));
+});
+app.MapDelete("/config/outputs/{name}", (string name) => ApplyResult(gatewayEngine.RemoveOutput(name)));
+
 app.MapGet("/config/outputs/{name}/map", (string name) =>
 {
     var output = gatewayEngine.Config.Outputs.FirstOrDefault(o => o.Name == name);
@@ -96,6 +125,13 @@ app.MapGet("/config/outputs/{name}/map", (string name) =>
     var (map, _) = RegisterMapBuilder.Build(output, wo);
     return Results.Text(RegisterMapBuilder.ExportCsv(map), "text/csv");
 });
+app.MapPost("/config/outputs/{name}/map", (string name, Dictionary<string, object?> body) => ApplyResult(gatewayEngine.UpsertMapEntry(name, body)));
+app.MapPut("/config/outputs/{name}/map/{tag}", (string name, string tag, Dictionary<string, object?> body) =>
+{
+    body["tag"] = tag;
+    return ApplyResult(gatewayEngine.UpsertMapEntry(name, body));
+});
+app.MapDelete("/config/outputs/{name}/map/{tag}", (string name, string tag) => ApplyResult(gatewayEngine.RemoveMapEntry(name, tag)));
 
 app.MapPost("/config/opcua/browse", async (OpcUaBrowseRequest req) =>
 {
@@ -169,8 +205,11 @@ static object RedactSource(SourceConfig s) => new
     s.Name,
     s.Driver,
     Settings = s.Settings.Where(kv => kv.Key is not ("password" or "password_env")).ToDictionary(kv => kv.Key, kv => kv.Value),
-    TagCount = s.Tags.Count,
+    s.Tags,
 };
+
+static IResult ApplyResult((bool Applied, List<string> Errors) r) =>
+    r.Applied ? Results.Ok(new { ok = true, warnings = r.Errors }) : Results.BadRequest(new { ok = false, errors = r.Errors });
 
 static object ToApiTag(TagSnapshot t) => new
 {

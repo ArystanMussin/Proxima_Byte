@@ -63,42 +63,43 @@ public static class ConfigLoader
         }
 
         if (root.TryGetValue("sources", out var srcs) && srcs is List<object> srcList)
-        {
             foreach (var raw in srcList.OfType<Dictionary<object, object?>>())
-            {
-                var d = Normalize(raw);
-                cfg.Sources.Add(new SourceConfig
-                {
-                    Name = d.GetStr("name"),
-                    Driver = d.GetStr("driver"),
-                    Tags = ExtractMapList(d, "tags"),
-                    Settings = d.Where(kv => !SourceKnownKeys.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value),
-                });
-            }
-        }
+                cfg.Sources.Add(ParseSource(Normalize(raw)));
 
         if (root.TryGetValue("outputs", out var outs) && outs is List<object> outList)
-        {
             foreach (var raw in outList.OfType<Dictionary<object, object?>>())
-            {
-                var d = Normalize(raw);
-                cfg.Outputs.Add(new OutputConfig
-                {
-                    Name = d.GetStr("name"),
-                    Interface = d.GetStr("interface"),
-                    Map = ExtractMapList(d, "map"),
-                    Settings = d.Where(kv => !OutputKnownKeys.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value),
-                });
-            }
-        }
+                cfg.Outputs.Add(ParseOutput(Normalize(raw)));
 
         return cfg;
     }
 
     /// <summary>
-    /// Extracts a list-of-maps value (e.g. `tags:`/`map:`). <paramref name="d"/> was already produced by
-    /// <see cref="Normalize"/>, which unwraps nested structures recursively, so entries here are already
-    /// plain <c>Dictionary&lt;string, object?&gt;</c> — no further normalization needed.
+    /// Builds a <see cref="SourceConfig"/> from a flat dict (`name`/`driver`/`tags` + driver-specific
+    /// keys) — shared by the YAML loader and the REST `/config/channels` write endpoints, so both paths
+    /// agree on which keys are "known" vs. fall through to <see cref="SourceConfig.Settings"/>.
+    /// </summary>
+    public static SourceConfig ParseSource(Dictionary<string, object?> d) => new()
+    {
+        Name = d.GetStr("name"),
+        Driver = d.GetStr("driver"),
+        Tags = ExtractMapList(d, "tags"),
+        Settings = d.Where(kv => !SourceKnownKeys.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value),
+    };
+
+    /// <summary>Same idea as <see cref="ParseSource"/>, for <see cref="OutputConfig"/> / `/config/outputs`.</summary>
+    public static OutputConfig ParseOutput(Dictionary<string, object?> d) => new()
+    {
+        Name = d.GetStr("name"),
+        Interface = d.GetStr("interface"),
+        Map = ExtractMapList(d, "map"),
+        Settings = d.Where(kv => !OutputKnownKeys.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value),
+    };
+
+    /// <summary>
+    /// Extracts a list-of-maps value (e.g. `tags:`/`map:`). <paramref name="d"/> is expected to already
+    /// be in canonical shape (nested dicts as <c>Dictionary&lt;string, object?&gt;</c>, nested lists as
+    /// <c>List&lt;object?&gt;</c>) — true for both YAML (after <see cref="Normalize"/>) and JSON request
+    /// bodies (after <see cref="JsonUnbox.ToPlain"/>).
     /// </summary>
     private static List<Dictionary<string, object?>> ExtractMapList(Dictionary<string, object?> d, string key) =>
         d.TryGetValue(key, out var v) && v is List<object?> list
@@ -141,6 +142,7 @@ public static class ConfigValidator
         var errors = new List<string>();
 
         var sourceNames = new HashSet<string>();
+        var knownTagIds = new HashSet<string>();
         foreach (var s in cfg.Sources)
         {
             if (string.IsNullOrWhiteSpace(s.Name)) errors.Add("source without a name");
@@ -154,6 +156,7 @@ public static class ConfigValidator
                 var name = t.GetStr("name");
                 if (string.IsNullOrWhiteSpace(name)) errors.Add($"source '{s.Name}' has a tag without a name");
                 else if (!tagNames.Add(name)) errors.Add($"duplicate tag '{s.Name}.{name}'");
+                else knownTagIds.Add($"{s.Name}.{name}");
             }
         }
 
@@ -169,8 +172,12 @@ public static class ConfigValidator
             {
                 var tag = m.GetStr("tag");
                 if (string.IsNullOrWhiteSpace(tag)) { errors.Add($"output '{o.Name}' has a map entry without 'tag'"); continue; }
-                if (!sourceNames.Contains(tag.Split('.')[0]))
-                    errors.Add($"output '{o.Name}' maps unknown tag '{tag}'");
+                var sourcePrefix = tag.Split('.')[0];
+                if (sourcePrefix == "_System") continue; // diagnostic tags aren't declared under `sources:` (§8)
+                if (!sourceNames.Contains(sourcePrefix))
+                    errors.Add($"output '{o.Name}' maps unknown tag '{tag}' (no such source)");
+                else if (!knownTagIds.Contains(tag))
+                    errors.Add($"output '{o.Name}' maps unknown tag '{tag}' (source exists but has no such tag)");
             }
         }
 
