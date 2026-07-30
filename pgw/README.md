@@ -151,7 +151,10 @@ dotnet test PGW.sln
   `CAP_NET_BIND_SERVICE` для порта 502)
 - Docker: `deploy/Dockerfile` (self-contained `linux-x64`)
 - Windows: `dotnet publish -r win-x64 --self-contained -p:PublishSingleFile=true`, регистрация службы
-  через `.UseWindowsService()` (Session 0, штатно, без NSSM)
+  через `.UseWindowsService()` (Session 0, штатно, без NSSM). Готовый zip (exe + wwwroot + demo-конфиг
+  + `.bat`-лаунчеры из `deploy/windows/`) собирается автоматически на каждый push через
+  `.github/workflows/ci.yml` (job `publish-windows`) и лежит в артефактах соответствующего workflow
+  run на вкладке **Actions** репозитория — не нужно просить пересобрать вручную.
 
 ## Известные упрощения v0.1 (сознательно, ради компактности кода)
 

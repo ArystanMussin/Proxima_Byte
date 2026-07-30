@@ -3,3 +3,4 @@ obj/
 *.user
 .vs/
 *.map.csv
+pkg/
