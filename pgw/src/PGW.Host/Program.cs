@@ -5,12 +5,36 @@ using PGW.Core;
 using PGW.Drivers.Modbus;
 using PGW.Drivers.OpcUa;
 using PGW.Host;
+using PGW.Simulator;
 using Serilog;
 
 var paths = new PathProvider();
 Directory.CreateDirectory(paths.ConfigDir);
 Directory.CreateDirectory(paths.DataDir);
 Directory.CreateDirectory(paths.LogsDir);
+
+// `pgw simulate` needs no project.yaml at all — it just stands up fake devices for a `sources:` entry
+// to point at, so the whole read/write path can be exercised without real hardware (§13-style setup,
+// but for connectivity testing rather than an automated test).
+if (args.Length > 0 && args[0] == "simulate")
+{
+    var modbusPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_MODBUS_PORT"), out var mp) ? mp : 15020;
+    var opcuaPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_OPCUA_PORT"), out var op) ? op : 4840;
+
+    using var modbusSim = new SimulatedModbusServer();
+    modbusSim.Start("127.0.0.1", modbusPort);
+    Console.WriteLine($"Simulated Modbus TCP device: 127.0.0.1:{modbusPort}, unit 1 (T1_supply=HR:100, P1_supply=HR:102, setpoint=HR:104 rw, pump1_run=DI:0)");
+
+    using var opcuaSim = new SimulatedOpcUaServer();
+    await opcuaSim.StartAsync(opcuaPort, Path.Combine(paths.DataDir, "certs", "_simulator"), CancellationToken.None);
+    Console.WriteLine($"Simulated OPC UA server: opc.tcp://127.0.0.1:{opcuaPort}/pgw/simulator (ns=1;s=T1_supply / P1_supply / setpoint rw / pump1_run)");
+
+    Console.WriteLine("Point a source at either (see demo/project.yaml) and press Ctrl+C to stop.");
+    var stop = new TaskCompletionSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.TrySetResult(); };
+    await stop.Task;
+    return 0;
+}
 
 var configPath = Environment.GetEnvironmentVariable("PGW_CONFIG") ?? Path.Combine(paths.ConfigDir, "project.yaml");
 if (!File.Exists(configPath))

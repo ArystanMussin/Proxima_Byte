@@ -20,9 +20,12 @@ OPC UA Client     ───┘   (value+quality     └── (REST /runtime, /c
 src/PGW.Core            — Tag Space, контракты, конфиг, YAML-загрузчик, cross-platform пути
 src/PGW.Drivers.Modbus   — Modbus TCP Client (master) + Modbus TCP Server (slave)
 src/PGW.Drivers.OpcUa    — OPC UA Client
+src/PGW.Simulator        — встроенные симулированные Modbus TCP / OPC UA серверы (`pgw simulate`,
+                           см. "Быстрый просмотр" ниже) — тестировать без реального железа
 src/PGW.Host             — composition root: DI-сборка драйверов/интерфейсов, REST API, Worker Service,
                            wwwroot/ — веб-панель (см. "Веб-панель" ниже)
-tests/PGW.Core.Tests     — unit- и end-to-end тесты (реальные TCP-сокеты, без моков протокола)
+tests/PGW.Core.Tests     — unit- и end-to-end тесты (реальные TCP-сокеты и реальный OPC UA сервер,
+                           без моков протокола)
 deploy/                  — systemd unit, Dockerfile
 project.sample.yaml      — пример конфигурации (§7.2)
 ```
@@ -40,23 +43,32 @@ dotnet run --project src/PGW.Host
 # CLI
 dotnet run --project src/PGW.Host -- validate      # проверить конфиг и выйти
 dotnet run --project src/PGW.Host -- export-map     # выгрузить карту регистров в CSV
+dotnet run --project src/PGW.Host -- simulate       # поднять встроенные Modbus/OPC UA симуляторы (см. ниже)
 ```
 
 ## Быстрый просмотр без реального оборудования
 
-`demo/` — готовый стенд: симулированный Modbus-PLC + конфиг под него, чтобы увидеть панель с живыми
-данными сразу после `git clone`, без настройки настоящих устройств. Два терминала:
+`pgw simulate` поднимает в том же исполняемом файле **и** Modbus TCP Server, **и** OPC UA Server с
+несколькими "дышащими" тегами (T1_supply/P1_supply меняются каждые ~0.7 с, setpoint — RW) — не
+отдельный скрипт-заглушка, а такой же встроенный режим PGW, как `run`/`validate`. `demo/project.yaml`
+настраивает оба протокола сразу на этот же симулятор, так что один прогон показывает полный
+кросс-протокольный путь (Modbus-источник и OPC UA-источник → общий Modbus-выход). Два терминала:
 
 ```bash
-# терминал 1 — симулированный PLC на 127.0.0.1:15020
-dotnet run --project demo/SimulatedPlc
+# терминал 1 — встроенный симулятор: Modbus на 127.0.0.1:15020, OPC UA на opc.tcp://127.0.0.1:4840/pgw/simulator
+dotnet run --project src/PGW.Host -- simulate
 
-# терминал 2 — сам шлюз с демо-конфигом
+# терминал 2 — сам шлюз с демо-конфигом (оба источника указывают на симулятор из терминала 1)
 cd src/PGW.Host
 PGW_CONFIG=../../demo/project.yaml dotnet run          # Windows PowerShell: $env:PGW_CONFIG="..\..\demo\project.yaml"; dotnet run
 ```
 
-Открой `http://localhost:8080/` — значения `T1_supply`/`P1_supply` будут меняться каждые ~0.7 с.
+Порты симулятора переопределяются `PGW_SIM_MODBUS_PORT`/`PGW_SIM_OPCUA_PORT`, если 15020/4840 заняты.
+Сертификат OPC UA-симулятора генерируется один раз при первом запуске (несколько секунд) и кэшируется
+в `<DataDir>/certs/_simulator`.
+
+Открой `http://localhost:8080/` — увидишь оба источника (`ctp_12` по Modbus, `plc_opcua` по OPC UA)
+подключёнными, с живыми значениями по обоим протоколам одновременно.
 
 Тесты (включают реальный Modbus round-trip через loopback-сокеты, не моки):
 
@@ -161,6 +173,11 @@ dotnet test PGW.sln
   забыв про ссылающуюся на него запись карты, теперь честно подсвечивается как ошибка при reload/save.
 - Redundancy (§14.1), CSV import — вне v0.1 согласно самому ТЗ (§12, этап 7+).
 
-Все взаимодействия Modbus↔Modbus проверены end-to-end (реальные сокеты, реальная запись в обе стороны).
-OPC UA-драйвер собран и проверен по актуальному API SDK, но не тестировался против живого OPC UA
-сервера в этом окружении — перед продакшеном проверьте против реального/симулированного PLC.
+Все взаимодействия проверены end-to-end на реальных сокетах (не моках), в обе стороны:
+Modbus↔Modbus (`ModbusRoundTripTests`, `CoreIsolationTests`) и OPC UA (`OpcUaRoundTripTests` — реальный
+`SimulatedOpcUaServer` из `PGW.Simulator`, реальная подписка, реальная запись, подтверждённая через
+подписку же). Дополнительно прогнан ручной сценарий с обоими протоколами в одном демо (`pgw simulate` +
+`demo/project.yaml`): SCADA-клиент читает и пишет через Modbus-выход в тег, который физически хранится
+на симулированном OPC UA сервере — то есть кросс-протокольная запись Modbus→OPC UA подтверждена вживую,
+не только модульным тестом. Перед реальным продакшеном всё равно стоит проверить против настоящего
+OPC UA сервера конкретного вендора — политики безопасности и типы данных на практике отличаются.

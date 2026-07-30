@@ -4,6 +4,7 @@
     <ProjectReference Include="..\PGW.Core\PGW.Core.csproj" />
     <ProjectReference Include="..\PGW.Drivers.Modbus\PGW.Drivers.Modbus.csproj" />
     <ProjectReference Include="..\PGW.Drivers.OpcUa\PGW.Drivers.OpcUa.csproj" />
+    <ProjectReference Include="..\PGW.Simulator\PGW.Simulator.csproj" />
   </ItemGroup>
 
   <ItemGroup>

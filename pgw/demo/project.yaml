@@ -1,4 +1,6 @@
-# Demo config for `demo/SimulatedPlc` — see README "Быстрый просмотр".
+# Demo config for `pgw simulate` — see README "Быстрый просмотр". Both sources point at the
+# built-in simulator (one Modbus device, one OPC UA server), so both protocol drivers get
+# exercised end to end without any real hardware.
 gateway:
   name: PGW-Demo
 
@@ -15,6 +17,17 @@ sources:
       - {name: setpoint,  area: HR, address: 104, type: uint16, access: RW, units: "°C"}
       - {name: pump1_run, area: DI, address: 0, type: bool}
 
+  - name: plc_opcua
+    driver: opcua_client
+    endpoint: "opc.tcp://127.0.0.1:4840/pgw/simulator"
+    security: {policy: None, mode: None, auth: anonymous, autoaccept: true}
+    subscription: {publishing_interval_ms: 300}
+    tags:
+      - {name: T1_supply, node_id: "ns=1;s=T1_supply", type: float64, units: "°C"}
+      - {name: P1_supply, node_id: "ns=1;s=P1_supply", type: float64, units: "kPa"}
+      - {name: setpoint,  node_id: "ns=1;s=setpoint",  type: float64, access: RW, units: "°C"}
+      - {name: pump1_run, node_id: "ns=1;s=pump1_run", type: bool}
+
 outputs:
   - name: scada_slave
     interface: modbus_tcp_server
@@ -26,3 +39,7 @@ outputs:
       - {tag: ctp_12.P1_supply, unit_id: 1, area: HR, address: 2, type: uint16}
       - {tag: ctp_12.setpoint,  unit_id: 1, area: HR, address: 4, type: uint16, rw: true}
       - {tag: ctp_12.pump1_run, unit_id: 1, area: DI, address: 0, type: bool}
+      - {tag: plc_opcua.T1_supply, unit_id: 2, area: HR, address: 0, type: float64}
+      - {tag: plc_opcua.P1_supply, unit_id: 2, area: HR, address: 4, type: float64}
+      - {tag: plc_opcua.setpoint,  unit_id: 2, area: HR, address: 8, type: float64, rw: true}
+      - {tag: plc_opcua.pump1_run, unit_id: 2, area: DI, address: 0, type: bool}
