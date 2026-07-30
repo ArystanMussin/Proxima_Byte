@@ -13,6 +13,6 @@ USER pgw
 ENV PGW_CONFIG=/etc/pgw/project.yaml
 # Bind 0.0.0.0 inside the container: the container's own network namespace + `-p` publishing is the
 # access boundary here, not the app (unlike a bare-metal/systemd install, where 127.0.0.1 is correct — §10).
-ENV PGW_API_URL=http://0.0.0.0:8080
-EXPOSE 502 8080
+ENV PGW_API_URL=http://0.0.0.0:8420
+EXPOSE 502 8420
 ENTRYPOINT ["./PGW.Host"]

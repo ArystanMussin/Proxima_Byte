@@ -19,7 +19,7 @@ sources:
 
   - name: plc_opcua
     driver: opcua_client
-    endpoint: "opc.tcp://127.0.0.1:4840/pgw/simulator"
+    endpoint: "opc.tcp://127.0.0.1:4841/pgw/simulator"
     security: {policy: None, mode: None, auth: anonymous, autoaccept: true}
     subscription: {publishing_interval_ms: 300}
     tags:

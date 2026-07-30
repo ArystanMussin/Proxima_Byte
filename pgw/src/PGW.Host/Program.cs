@@ -19,7 +19,9 @@ Directory.CreateDirectory(paths.LogsDir);
 if (args.Length > 0 && args[0] == "simulate")
 {
     var modbusPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_MODBUS_PORT"), out var mp) ? mp : 15020;
-    var opcuaPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_OPCUA_PORT"), out var op) ? op : 4840;
+    // 4841, not the canonical 4840 — 4840 is the OPC UA default and commonly already taken by other
+    // OPC UA software (UaExpert, another server, etc.) on the same machine.
+    var opcuaPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_OPCUA_PORT"), out var op) ? op : 4841;
 
     using var modbusSim = new SimulatedModbusServer();
     modbusSim.Start("127.0.0.1", modbusPort);
@@ -80,7 +82,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog();
 builder.Host.UseWindowsService();
 builder.Host.UseSystemd();
-builder.WebHost.UseUrls(Environment.GetEnvironmentVariable("PGW_API_URL") ?? "http://127.0.0.1:8080");
+// 8420, not the very common dev-tool default 8080 — 8080 collides constantly with other
+// local software (proxies, other web servers, etc.) on Windows machines.
+builder.WebHost.UseUrls(Environment.GetEnvironmentVariable("PGW_API_URL") ?? "http://127.0.0.1:8420");
 
 var gatewayEngine = new GatewayEngine(paths, configPath);
 builder.Services.AddSingleton(gatewayEngine);
