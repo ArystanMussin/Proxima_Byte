@@ -157,7 +157,22 @@ const AREA_OPTIONS = [
   { value: "DI", label: "Discrete Input (DI)" },
   { value: "CO", label: "Coil (CO)" },
 ];
-const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", opcua_client: "OPC UA" };
+const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", mercury_client: "Меркурий", opcua_client: "OPC UA" };
+const MERCURY_PARAM_OPTIONS = [
+  { value: "energy_active_total", label: "Энергия, активная, суммарно" },
+  { value: "energy_reactive_total", label: "Энергия, реактивная, суммарно" },
+  { value: "voltage_a", label: "Напряжение, фаза A" },
+  { value: "voltage_b", label: "Напряжение, фаза B" },
+  { value: "voltage_c", label: "Напряжение, фаза C" },
+  { value: "current_a", label: "Ток, фаза A" },
+  { value: "current_b", label: "Ток, фаза B" },
+  { value: "current_c", label: "Ток, фаза C" },
+  { value: "power_total", label: "Мощность, суммарно" },
+  { value: "power_a", label: "Мощность, фаза A" },
+  { value: "power_b", label: "Мощность, фаза B" },
+  { value: "power_c", label: "Мощность, фаза C" },
+  { value: "frequency", label: "Частота сети" },
+];
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -203,8 +218,8 @@ function renderCfgSources() {
   for (const s of cfgSources) {
     const summary = s.driver === "opcua_client"
       ? (s.settings.endpoint ?? "")
-      : s.driver === "modbus_rtu_client"
-      ? `${s.settings.serial_port ?? "?"} @ ${s.settings.baud_rate ?? "9600"} unit ${s.settings.unit_id ?? "1"}`
+      : s.driver === "modbus_rtu_client" || s.driver === "mercury_client"
+      ? `${s.settings.serial_port ?? "?"} @ ${s.settings.baud_rate ?? "9600"} addr ${s.settings.unit_id ?? "1"}`
       : `${s.settings.host ?? "?"}:${s.settings.port ?? "?"} unit ${s.settings.unit_id ?? "1"}`;
 
     const entity = document.createElement("div");
@@ -230,7 +245,9 @@ function renderCfgSources() {
 
     const tagsBox = entity.querySelector(".tags-box");
     for (const t of s.tags) {
-      const loc = s.driver === "opcua_client" ? t.node_id : `${t.area}:${t.address}${t.bit != null ? "." + t.bit : ""}`;
+      const loc = s.driver === "opcua_client" ? t.node_id
+        : s.driver === "mercury_client" ? t.param
+        : `${t.area}:${t.address}${t.bit != null ? "." + t.bit : ""}`;
       const row = document.createElement("div");
       row.className = "child-row";
       row.innerHTML = `
@@ -303,23 +320,29 @@ function sourceFields() {
     { key: "driver", label: "Драйвер", type: "select", options: [
       { value: "modbus_tcp_client", label: "Modbus TCP Client" },
       { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
+      { value: "mercury_client", label: "Меркурий (RS-485, счётчики электроэнергии)" },
       { value: "opcua_client", label: "OPC UA Client" },
     ] },
     { key: "host", label: "Host/IP (Modbus TCP)", type: "text" },
     { key: "port", label: "Port (Modbus TCP)", type: "number" },
-    { key: "serial_port", label: "Serial port (Modbus RTU)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
-    { key: "baud_rate", label: "Baud rate (Modbus RTU)", type: "number", placeholder: "9600" },
-    { key: "parity", label: "Parity (Modbus RTU)", type: "select", options: [
+    { key: "serial_port", label: "Serial port (Modbus RTU / Меркурий)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
+    { key: "baud_rate", label: "Baud rate (Modbus RTU / Меркурий)", type: "number", placeholder: "9600" },
+    { key: "parity", label: "Parity (Modbus RTU / Меркурий)", type: "select", options: [
       { value: "even", label: "Even" },
       { value: "odd", label: "Odd" },
       { value: "none", label: "None" },
     ] },
-    { key: "stop_bits", label: "Stop bits (Modbus RTU)", type: "select", options: [
+    { key: "stop_bits", label: "Stop bits (Modbus RTU / Меркурий)", type: "select", options: [
       { value: "one", label: "1" },
       { value: "two", label: "2" },
     ] },
-    { key: "unit_id", label: "Unit ID (Modbus)", type: "number" },
-    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus)", type: "number" },
+    { key: "unit_id", label: "Unit ID / адрес (Modbus / Меркурий)", type: "number" },
+    { key: "access_level", label: "Уровень доступа (Меркурий)", type: "select", options: [
+      { value: "1", label: "1 — чтение (по умолчанию)" },
+      { value: "2", label: "2 — админ" },
+    ] },
+    { key: "password", label: "Пароль, 6 цифр (Меркурий, необязательно)", type: "text", placeholder: "по умолчанию для уровня 1" },
+    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus / Меркурий)", type: "number" },
     { key: "endpoint", label: "Endpoint URL (OPC UA)", type: "text", placeholder: "opc.tcp://host:4840" },
     { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"timeout_ms": 1000, "retries": 2}' },
   ];
@@ -333,6 +356,7 @@ function tagFields() {
     { key: "area", label: "Область (Modbus)", type: "select", options: AREA_OPTIONS },
     { key: "address", label: "Адрес (Modbus)", type: "number" },
     { key: "node_id", label: "NodeId (OPC UA)", type: "text", placeholder: "ns=2;s=Device.Tag" },
+    { key: "param", label: "Параметр (Меркурий)", type: "select", options: MERCURY_PARAM_OPTIONS },
     { key: "units", label: "Единицы измерения", type: "text" },
     { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
   ];

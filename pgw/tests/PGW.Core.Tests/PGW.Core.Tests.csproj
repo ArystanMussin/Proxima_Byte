@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\PGW.Core\PGW.Core.csproj" />
     <ProjectReference Include="..\..\src\PGW.Drivers.Modbus\PGW.Drivers.Modbus.csproj" />
+    <ProjectReference Include="..\..\src\PGW.Drivers.Mercury\PGW.Drivers.Mercury.csproj" />
     <ProjectReference Include="..\..\src\PGW.Drivers.OpcUa\PGW.Drivers.OpcUa.csproj" />
     <ProjectReference Include="..\..\src\PGW.Simulator\PGW.Simulator.csproj" />
     <ProjectReference Include="..\..\src\PGW.Host\PGW.Host.csproj" />
