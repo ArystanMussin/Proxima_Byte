@@ -157,7 +157,7 @@ const AREA_OPTIONS = [
   { value: "DI", label: "Discrete Input (DI)" },
   { value: "CO", label: "Coil (CO)" },
 ];
-const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", mercury_client: "Меркурий", opcua_client: "OPC UA" };
+const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", mercury_client: "Меркурий", iec104_client: "IEC 60870-5-104", opcua_client: "OPC UA" };
 const MERCURY_PARAM_OPTIONS = [
   { value: "energy_active_total", label: "Энергия, активная, суммарно" },
   { value: "energy_reactive_total", label: "Энергия, реактивная, суммарно" },
@@ -220,6 +220,8 @@ function renderCfgSources() {
       ? (s.settings.endpoint ?? "")
       : s.driver === "modbus_rtu_client" || s.driver === "mercury_client"
       ? `${s.settings.serial_port ?? "?"} @ ${s.settings.baud_rate ?? "9600"} addr ${s.settings.unit_id ?? "1"}`
+      : s.driver === "iec104_client"
+      ? `${s.settings.host ?? "?"}:${s.settings.port ?? "2404"} CASDU ${s.settings.common_address ?? "1"}`
       : `${s.settings.host ?? "?"}:${s.settings.port ?? "?"} unit ${s.settings.unit_id ?? "1"}`;
 
     const entity = document.createElement("div");
@@ -247,6 +249,7 @@ function renderCfgSources() {
     for (const t of s.tags) {
       const loc = s.driver === "opcua_client" ? t.node_id
         : s.driver === "mercury_client" ? t.param
+        : s.driver === "iec104_client" ? `IOA:${t.ioa}`
         : `${t.area}:${t.address}${t.bit != null ? "." + t.bit : ""}`;
       const row = document.createElement("div");
       row.className = "child-row";
@@ -321,10 +324,13 @@ function sourceFields() {
       { value: "modbus_tcp_client", label: "Modbus TCP Client" },
       { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
       { value: "mercury_client", label: "Меркурий (RS-485, счётчики электроэнергии)" },
+      { value: "iec104_client", label: "IEC 60870-5-104 (SCADA/телемеханика)" },
       { value: "opcua_client", label: "OPC UA Client" },
     ] },
-    { key: "host", label: "Host/IP (Modbus TCP)", type: "text" },
-    { key: "port", label: "Port (Modbus TCP)", type: "number" },
+    { key: "host", label: "Host/IP (Modbus TCP / IEC 104)", type: "text" },
+    { key: "port", label: "Port (Modbus TCP / IEC 104, по умолчанию 2404)", type: "number" },
+    { key: "common_address", label: "Common Address ASDU (IEC 104)", type: "number", placeholder: "1" },
+    { key: "interrogation_interval_ms", label: "Интервал общего опроса, ms (IEC 104)", type: "number", placeholder: "30000" },
     { key: "serial_port", label: "Serial port (Modbus RTU / Меркурий)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
     { key: "baud_rate", label: "Baud rate (Modbus RTU / Меркурий)", type: "number", placeholder: "9600" },
     { key: "parity", label: "Parity (Modbus RTU / Меркурий)", type: "select", options: [
@@ -357,6 +363,7 @@ function tagFields() {
     { key: "address", label: "Адрес (Modbus)", type: "number" },
     { key: "node_id", label: "NodeId (OPC UA)", type: "text", placeholder: "ns=2;s=Device.Tag" },
     { key: "param", label: "Параметр (Меркурий)", type: "select", options: MERCURY_PARAM_OPTIONS },
+    { key: "ioa", label: "IOA — адрес объекта (IEC 104)", type: "number" },
     { key: "units", label: "Единицы измерения", type: "text" },
     { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
   ];
