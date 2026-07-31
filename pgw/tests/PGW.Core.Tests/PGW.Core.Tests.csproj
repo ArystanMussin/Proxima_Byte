@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\PGW.Drivers.Modbus\PGW.Drivers.Modbus.csproj" />
     <ProjectReference Include="..\..\src\PGW.Drivers.Mercury\PGW.Drivers.Mercury.csproj" />
     <ProjectReference Include="..\..\src\PGW.Drivers.Iec104\PGW.Drivers.Iec104.csproj" />
+    <ProjectReference Include="..\..\src\PGW.Drivers.Dlms\PGW.Drivers.Dlms.csproj" />
     <ProjectReference Include="..\..\src\PGW.Drivers.OpcUa\PGW.Drivers.OpcUa.csproj" />
     <ProjectReference Include="..\..\src\PGW.Simulator\PGW.Simulator.csproj" />
     <ProjectReference Include="..\..\src\PGW.Host\PGW.Host.csproj" />

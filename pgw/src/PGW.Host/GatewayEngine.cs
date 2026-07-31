@@ -1,4 +1,5 @@
 using PGW.Core;
+using PGW.Drivers.Dlms;
 using PGW.Drivers.Iec104;
 using PGW.Drivers.Mercury;
 using PGW.Drivers.Modbus;
@@ -20,7 +21,7 @@ public sealed class GatewayEngine
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
     public int ConfigVersion { get; private set; }
 
-    private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, ModbusRtuSourceFactory.TypeId, OpcUaSourceFactory.TypeId, MercurySourceFactory.TypeId, Iec104SourceFactory.TypeId };
+    private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, ModbusRtuSourceFactory.TypeId, OpcUaSourceFactory.TypeId, MercurySourceFactory.TypeId, Iec104SourceFactory.TypeId, DlmsSourceFactory.TypeId };
     private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
 
     private sealed record DriverEntry(SourceConfig Config, IProtocolDriver Driver, DeviceHandle Device, List<string> TagIds);
@@ -135,6 +136,7 @@ public sealed class GatewayEngine
                 ModbusRtuSourceFactory.TypeId => ModbusRtuSourceFactory.Build(src, EventLog),
                 MercurySourceFactory.TypeId => MercurySourceFactory.Build(src, EventLog),
                 Iec104SourceFactory.TypeId => Iec104SourceFactory.Build(src, EventLog),
+                DlmsSourceFactory.TypeId => DlmsSourceFactory.Build(src, EventLog),
                 OpcUaSourceFactory.TypeId => OpcUaSourceFactory.Build(src, EventLog, _paths),
                 _ => throw new NotSupportedException($"unknown driver '{src.Driver}'"),
             };

@@ -157,7 +157,7 @@ const AREA_OPTIONS = [
   { value: "DI", label: "Discrete Input (DI)" },
   { value: "CO", label: "Coil (CO)" },
 ];
-const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", mercury_client: "Меркурий", iec104_client: "IEC 60870-5-104", opcua_client: "OPC UA" };
+const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", mercury_client: "Меркурий", iec104_client: "IEC 60870-5-104", dlms_client: "DLMS/COSEM", opcua_client: "OPC UA" };
 const MERCURY_PARAM_OPTIONS = [
   { value: "energy_active_total", label: "Энергия, активная, суммарно" },
   { value: "energy_reactive_total", label: "Энергия, реактивная, суммарно" },
@@ -222,6 +222,8 @@ function renderCfgSources() {
       ? `${s.settings.serial_port ?? "?"} @ ${s.settings.baud_rate ?? "9600"} addr ${s.settings.unit_id ?? "1"}`
       : s.driver === "iec104_client"
       ? `${s.settings.host ?? "?"}:${s.settings.port ?? "2404"} CASDU ${s.settings.common_address ?? "1"}`
+      : s.driver === "dlms_client"
+      ? `${s.settings.host ?? "?"}:${s.settings.port ?? "4059"} LD ${s.settings.logical_device_address ?? "1"}`
       : `${s.settings.host ?? "?"}:${s.settings.port ?? "?"} unit ${s.settings.unit_id ?? "1"}`;
 
     const entity = document.createElement("div");
@@ -250,6 +252,7 @@ function renderCfgSources() {
       const loc = s.driver === "opcua_client" ? t.node_id
         : s.driver === "mercury_client" ? t.param
         : s.driver === "iec104_client" ? `IOA:${t.ioa}`
+        : s.driver === "dlms_client" ? `OBIS:${t.obis}${t.class_id ? " cls" + t.class_id : ""}`
         : `${t.area}:${t.address}${t.bit != null ? "." + t.bit : ""}`;
       const row = document.createElement("div");
       row.className = "child-row";
@@ -325,12 +328,19 @@ function sourceFields() {
       { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
       { value: "mercury_client", label: "Меркурий (RS-485, счётчики электроэнергии)" },
       { value: "iec104_client", label: "IEC 60870-5-104 (SCADA/телемеханика)" },
+      { value: "dlms_client", label: "DLMS/COSEM (счётчики, TCP-wrapper)" },
       { value: "opcua_client", label: "OPC UA Client" },
     ] },
-    { key: "host", label: "Host/IP (Modbus TCP / IEC 104)", type: "text" },
-    { key: "port", label: "Port (Modbus TCP / IEC 104, по умолчанию 2404)", type: "number" },
+    { key: "host", label: "Host/IP (Modbus TCP / IEC 104 / DLMS)", type: "text" },
+    { key: "port", label: "Port (Modbus TCP / IEC 104 = 2404 / DLMS = 4059)", type: "number" },
     { key: "common_address", label: "Common Address ASDU (IEC 104)", type: "number", placeholder: "1" },
     { key: "interrogation_interval_ms", label: "Интервал общего опроса, ms (IEC 104)", type: "number", placeholder: "30000" },
+    { key: "logical_device_address", label: "Logical Device Address (DLMS)", type: "number", placeholder: "1" },
+    { key: "client_address", label: "Client Address (DLMS)", type: "number", placeholder: "1" },
+    { key: "security", label: "Security (DLMS)", type: "select", options: [
+      { value: "none", label: "none — без пароля" },
+      { value: "lls", label: "lls — Low Level Security (пароль)" },
+    ] },
     { key: "serial_port", label: "Serial port (Modbus RTU / Меркурий)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
     { key: "baud_rate", label: "Baud rate (Modbus RTU / Меркурий)", type: "number", placeholder: "9600" },
     { key: "parity", label: "Parity (Modbus RTU / Меркурий)", type: "select", options: [
@@ -347,8 +357,8 @@ function sourceFields() {
       { value: "1", label: "1 — чтение (по умолчанию)" },
       { value: "2", label: "2 — админ" },
     ] },
-    { key: "password", label: "Пароль, 6 цифр (Меркурий, необязательно)", type: "text", placeholder: "по умолчанию для уровня 1" },
-    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus / Меркурий)", type: "number" },
+    { key: "password", label: "Пароль (Меркурий — 6 цифр; DLMS LLS — произвольная строка)", type: "text", placeholder: "необязательно" },
+    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus / Меркурий / DLMS)", type: "number" },
     { key: "endpoint", label: "Endpoint URL (OPC UA)", type: "text", placeholder: "opc.tcp://host:4840" },
     { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"timeout_ms": 1000, "retries": 2}' },
   ];
@@ -364,6 +374,9 @@ function tagFields() {
     { key: "node_id", label: "NodeId (OPC UA)", type: "text", placeholder: "ns=2;s=Device.Tag" },
     { key: "param", label: "Параметр (Меркурий)", type: "select", options: MERCURY_PARAM_OPTIONS },
     { key: "ioa", label: "IOA — адрес объекта (IEC 104)", type: "number" },
+    { key: "obis", label: "OBIS-код (DLMS)", type: "text", placeholder: "1.0.1.8.0.255" },
+    { key: "class_id", label: "Class ID (DLMS, по умолчанию 3 — Register)", type: "number", placeholder: "3" },
+    { key: "attribute_id", label: "Attribute ID (DLMS, по умолчанию 2 — value)", type: "number", placeholder: "2" },
     { key: "units", label: "Единицы измерения", type: "text" },
     { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
   ];
