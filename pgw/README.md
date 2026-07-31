@@ -60,6 +60,10 @@ dotnet run --project src/PGW.Host -- simulate       # поднять встро�
 
 ## Быстрый просмотр без реального оборудования
 
+Это раздел для запуска из исходников (два терминала, `dotnet run`) — удобно при разработке, когда
+симулятор и шлюз нужно перезапускать независимо. Готовый Windows-exe делает то же самое одним
+двойным кликом без единого терминала — см. "Развёртывание" ниже.
+
 `pgw simulate` поднимает в том же исполняемом файле **и** Modbus TCP Server, **и** OPC UA Server с
 несколькими "дышащими" тегами (T1_supply/P1_supply меняются каждые ~0.7 с, setpoint — RW) — не
 отдельный скрипт-заглушка, а такой же встроенный режим PGW, как `run`/`validate`. `demo/project.yaml`
@@ -474,11 +478,20 @@ reload без разрыва; перезапускается только то, 
 - Linux: `deploy/systemd/pgw.service` (непривилегированный пользователь `pgw`,
   `CAP_NET_BIND_SERVICE` для порта 502)
 - Docker: `deploy/Dockerfile` (self-contained `linux-x64`)
-- Windows: `dotnet publish -r win-x64 --self-contained -p:PublishSingleFile=true`, регистрация службы
-  через `.UseWindowsService()` (Session 0, штатно, без NSSM). Готовый zip (exe + wwwroot + demo-конфиг
-  + `.bat`-лаунчеры из `deploy/windows/`) собирается автоматически на каждый push через
-  `.github/workflows/ci.yml` (job `publish-windows`) и лежит в артефактах соответствующего workflow
-  run на вкладке **Actions** репозитория — не нужно просить пересобрать вручную.
+- Windows: `dotnet publish -r win-x64 --self-contained true -p:PublishSingleFile=true
+  -p:IncludeNativeLibrariesForSelfExtract=true` — один `PGW.Host.exe` (~100 МБ) с упакованным внутрь
+  .NET runtime, без внешних зависимостей. Двойной клик по exe без аргументов — это не просто "обычный
+  запуск": при первом запуске он сам создаёт рабочий конфиг с тестовыми данными (если своего ещё нет),
+  сам поднимает встроенный симулятор Modbus/OPC UA в том же процессе, и сам открывает браузер на
+  панели — второго окна/скрипта не нужно (см. `Program.cs`, `isDemoBootstrap`/`isInteractive`). Второй
+  двойной клик, пока экземпляр уже работает — не падает со стектрейсом, а просто открывает браузер на
+  уже работающей панели (ловит `SocketException`/`AddressAlreadyInUse` по всей цепочке запуска, не
+  только из Kestrel — см. `IsAddressInUse`). Регистрация как служба — через `.UseWindowsService()`
+  (Session 0, штатно, без NSSM); авто-бутстрап/авто-браузер там не срабатывают
+  (`WindowsServiceHelpers.IsWindowsService()` их отключает). Готовый zip (exe + wwwroot + demo-конфиг +
+  README) собирается автоматически на каждый push через `.github/workflows/ci.yml`
+  (job `publish-windows`) и лежит в артефактах соответствующего workflow run на вкладке **Actions**
+  репозитория — не нужно просить пересобрать вручную.
 
 ## Известные упрощения v0.1 (сознательно, ради компактности кода)
 

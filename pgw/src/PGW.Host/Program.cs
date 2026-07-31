@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Net.Sockets;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Hosting.Systemd;
 using Microsoft.Extensions.Hosting.WindowsServices;
@@ -39,6 +41,23 @@ if (args.Length > 0 && args[0] == "simulate")
 }
 
 var configPath = Environment.GetEnvironmentVariable("PGW_CONFIG") ?? Path.Combine(paths.ConfigDir, "project.yaml");
+
+// Double-click UX (§ README "Один exe, один двойной клик"): a fresh install has no project.yaml
+// anywhere yet. Rather than exit with an error the user has to go figure out, bootstrap the bundled
+// demo config on first run so the app has something to show immediately — same content as
+// `demo/project.yaml`, just copied into the real config location so future runs (and the Config
+// editor tab) treat it as a normal, editable config rather than a special read-only demo mode.
+var isDemoBootstrap = false;
+if (!File.Exists(configPath) && args.Length == 0)
+{
+    var bundledDemo = Path.Combine(AppContext.BaseDirectory, "demo", "project.yaml");
+    if (File.Exists(bundledDemo))
+    {
+        File.Copy(bundledDemo, configPath);
+        isDemoBootstrap = true;
+    }
+}
+
 if (!File.Exists(configPath))
 {
     Console.Error.WriteLine($"config file not found: {configPath}");
@@ -77,6 +96,22 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .WriteTo.File(Path.Combine(paths.LogsDir, "pgw-.log"), rollingInterval: RollingInterval.Day)
     .CreateLogger();
+
+// The bootstrapped demo config points its sources at the same simulator `pgw simulate` stands up —
+// start it in-process here so double-clicking the exe with nothing configured yet shows live data
+// immediately, with no second window/process for the user to know about or keep open.
+SimulatedModbusServer? demoModbusSim = null;
+SimulatedOpcUaServer? demoOpcUaSim = null;
+if (isDemoBootstrap)
+{
+    var modbusPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_MODBUS_PORT"), out var mp) ? mp : 15020;
+    var opcuaPort = int.TryParse(Environment.GetEnvironmentVariable("PGW_SIM_OPCUA_PORT"), out var op) ? op : 4841;
+    demoModbusSim = new SimulatedModbusServer();
+    demoModbusSim.Start("127.0.0.1", modbusPort);
+    demoOpcUaSim = new SimulatedOpcUaServer();
+    await demoOpcUaSim.StartAsync(opcuaPort, Path.Combine(paths.DataDir, "certs", "_simulator"), CancellationToken.None);
+    Log.Information("First run: bootstrapped demo config and started the embedded simulator (Modbus 127.0.0.1:{ModbusPort}, OPC UA 127.0.0.1:{OpcUaPort})", modbusPort, opcuaPort);
+}
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog();
@@ -274,8 +309,53 @@ app.MapGet("/runtime/event-log", (int? last) => gatewayEngine.EventLog.Snapshot(
 app.MapGet("/runtime/api-log", (int? last) => gatewayEngine.ApiLog.Snapshot(last));
 app.MapGet("/metrics", () => Results.Text(PrometheusExporter.Export(gatewayEngine), "text/plain"));
 
-app.Run();
+// Double-click UX: open the dashboard automatically once the server is actually listening, but only
+// when someone plausibly just double-clicked the exe or ran it from a terminal — never when hosted
+// as a real Windows Service/systemd unit, where there's no desktop session to open a browser on.
+var isInteractive = args.Length == 0 && !WindowsServiceHelpers.IsWindowsService() && !SystemdHelpers.IsSystemdService();
+var dashboardUrl = Environment.GetEnvironmentVariable("PGW_API_URL") ?? "http://127.0.0.1:8420";
+if (isInteractive)
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        try { Process.Start(new ProcessStartInfo(dashboardUrl) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Warning(ex, "could not auto-open the dashboard in a browser"); }
+    });
+}
+
+try
+{
+    app.Run();
+}
+catch (Exception ex) when (IsAddressInUse(ex))
+{
+    // Most likely cause: the exe was double-clicked while a previous instance is already running —
+    // either Kestrel's own dashboard port or one of the gateway's own listening sockets (e.g. the
+    // demo config's Modbus TCP Server output on 502) can be the one that collides; either way it
+    // means "an instance is already up." Rather than crash with a stack trace, just bring up the
+    // existing instance's dashboard — that's what a second double-click should feel like.
+    Log.Information("PGW is already running (port in use) — opening its dashboard instead of starting a second instance");
+    if (isInteractive)
+    {
+        try { Process.Start(new ProcessStartInfo(dashboardUrl) { UseShellExecute = true }); }
+        catch (Exception openEx) { Log.Warning(openEx, "could not auto-open the dashboard in a browser"); }
+    }
+}
+finally
+{
+    demoModbusSim?.Dispose();
+    demoOpcUaSim?.Dispose();
+}
+
 return 0;
+
+static bool IsAddressInUse(Exception? ex) =>
+    ex switch
+    {
+        null => false,
+        SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse } => true,
+        _ => IsAddressInUse(ex.InnerException),
+    };
 
 static object RedactSource(SourceConfig s) => new
 {

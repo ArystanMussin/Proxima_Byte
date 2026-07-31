@@ -24,9 +24,9 @@ jobs:
       - run: dotnet build PGW.sln --no-restore -c Release
       - run: dotnet test PGW.sln --no-build -c Release
 
-  # Framework-dependent single-file build (needs .NET 8 on the target machine, ~15 MB) — the same
-  # package sent ad hoc during development, now produced automatically so it's visible as a build
-  # artifact on every push instead of a one-off chat attachment.
+  # Self-contained single-file build (~100 MB, .NET runtime bundled — zero prerequisites on the
+  # target machine) so double-clicking PGW.Host.exe just works, produced automatically so it's
+  # visible as a build artifact on every push instead of a one-off chat attachment.
   publish-windows:
     needs: build-and-test
     runs-on: ubuntu-latest
@@ -40,9 +40,10 @@ jobs:
           dotnet-version: "8.0.x"
       - run: >
           dotnet publish src/PGW.Host/PGW.Host.csproj -c Release -r win-x64
-          --self-contained false -p:PublishSingleFile=true -o pkg/win-x64
+          --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o pkg/win-x64
       - run: |
-          cp deploy/windows/*.bat deploy/windows/README.txt demo/project.yaml pkg/win-x64/
+          cp deploy/windows/*.bat deploy/windows/README.txt pkg/win-x64/
       - uses: actions/upload-artifact@v4
         with:
           name: pgw-windows
