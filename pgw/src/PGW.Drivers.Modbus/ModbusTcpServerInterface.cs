@@ -52,6 +52,7 @@ public sealed class ModbusTcpServerInterface : IProtocolInterface
         _server.CoilsChanged += OnCoilsChanged;
         source.Changed += OnTagChanged;
 
+        _server.MaxConnections = _cfg.MaxConnections;
         _provider = new TrackingTcpClientProvider(_cfg.Bind, _cfg.Port, _cfg.WhitelistRead ?? new(), _log);
         _server.Start(_provider, false);
 
@@ -83,12 +84,31 @@ public sealed class ModbusTcpServerInterface : IProtocolInterface
 
     private void ApplyToBuffer(RegisterMapEntry m, TagSnapshot snap)
     {
-        object? value;
-        if (snap.Quality == TagQuality.Good) value = snap.Value;
-        else if (m.OnBad == OnBadPolicy.Zero) value = TagTypeConversion.DefaultValue(m.Type);
-        else if (m.OnBad == OnBadPolicy.Substitute) value = m.SubstituteValue ?? TagTypeConversion.DefaultValue(m.Type);
-        else return; // Hold / FreezeAndFlag: keep whatever is already in the buffer
+        if (snap.Quality == TagQuality.Good)
+        {
+            if (m.FlagAddress is { } okFlag) SetFlagBit(m.UnitId, okFlag, false);
+            WriteValue(m, snap.Value);
+            return;
+        }
 
+        switch (m.OnBad)
+        {
+            case OnBadPolicy.Zero:
+                WriteValue(m, TagTypeConversion.DefaultValue(m.Type));
+                break;
+            case OnBadPolicy.Substitute:
+                WriteValue(m, m.SubstituteValue ?? TagTypeConversion.DefaultValue(m.Type));
+                break;
+            case OnBadPolicy.FreezeAndFlag:
+                if (m.FlagAddress is { } badFlag) SetFlagBit(m.UnitId, badFlag, true);
+                break; // value stays frozen at whatever was last written
+            default:
+                break; // Hold: leave the value buffer untouched
+        }
+    }
+
+    private void WriteValue(RegisterMapEntry m, object? value)
+    {
         lock (_server.Lock)
         {
             if (m.Area == ModbusArea.Coil)
@@ -101,6 +121,15 @@ public sealed class ModbusTcpServerInterface : IProtocolInterface
                 var buf = m.Area == ModbusArea.HoldingRegister ? _server.GetHoldingRegisters(m.UnitId) : _server.GetInputRegisters(m.UnitId);
                 for (int i = 0; i < regs.Length; i++) buf[m.Address + i] = (short)regs[i];
             }
+        }
+    }
+
+    private void SetFlagBit(byte unitId, ModbusAddress flag, bool value)
+    {
+        lock (_server.Lock)
+        {
+            var buf = flag.Area == ModbusArea.Coil ? _server.GetCoils(unitId) : _server.GetDiscreteInputs(unitId);
+            ModbusCodec.SetPackedBit(buf, flag.Register, value);
         }
     }
 

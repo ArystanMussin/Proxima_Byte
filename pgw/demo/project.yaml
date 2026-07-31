@@ -35,7 +35,9 @@ outputs:
     port: 15021
     read_only: false
     map:
-      - {tag: ctp_12.T1_supply, unit_id: 1, area: HR, address: 0, type: uint16}
+      # on_bad: freeze_and_flag demo — while ctp_12 is disconnected, T1_supply freezes at its last good
+      # value instead of resetting to 0, and DI:1 flips true so a SCADA client can tell it's stale.
+      - {tag: ctp_12.T1_supply, unit_id: 1, area: HR, address: 0, type: uint16, on_bad: freeze_and_flag, flag_area: DI, flag_address: 1}
       - {tag: ctp_12.P1_supply, unit_id: 1, area: HR, address: 2, type: uint16}
       - {tag: ctp_12.setpoint,  unit_id: 1, area: HR, address: 4, type: uint16, rw: true}
       - {tag: ctp_12.pump1_run, unit_id: 1, area: DI, address: 0, type: bool}
