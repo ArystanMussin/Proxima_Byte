@@ -157,7 +157,7 @@ const AREA_OPTIONS = [
   { value: "DI", label: "Discrete Input (DI)" },
   { value: "CO", label: "Coil (CO)" },
 ];
-const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", opcua_client: "OPC UA" };
+const DRIVER_LABELS = { modbus_tcp_client: "Modbus TCP", modbus_rtu_client: "Modbus RTU", opcua_client: "OPC UA" };
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -203,6 +203,8 @@ function renderCfgSources() {
   for (const s of cfgSources) {
     const summary = s.driver === "opcua_client"
       ? (s.settings.endpoint ?? "")
+      : s.driver === "modbus_rtu_client"
+      ? `${s.settings.serial_port ?? "?"} @ ${s.settings.baud_rate ?? "9600"} unit ${s.settings.unit_id ?? "1"}`
       : `${s.settings.host ?? "?"}:${s.settings.port ?? "?"} unit ${s.settings.unit_id ?? "1"}`;
 
     const entity = document.createElement("div");
@@ -300,10 +302,22 @@ function sourceFields() {
     { key: "name", label: "Имя источника", type: "text" },
     { key: "driver", label: "Драйвер", type: "select", options: [
       { value: "modbus_tcp_client", label: "Modbus TCP Client" },
+      { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
       { value: "opcua_client", label: "OPC UA Client" },
     ] },
-    { key: "host", label: "Host/IP (Modbus)", type: "text" },
-    { key: "port", label: "Port (Modbus)", type: "number" },
+    { key: "host", label: "Host/IP (Modbus TCP)", type: "text" },
+    { key: "port", label: "Port (Modbus TCP)", type: "number" },
+    { key: "serial_port", label: "Serial port (Modbus RTU)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
+    { key: "baud_rate", label: "Baud rate (Modbus RTU)", type: "number", placeholder: "9600" },
+    { key: "parity", label: "Parity (Modbus RTU)", type: "select", options: [
+      { value: "even", label: "Even" },
+      { value: "odd", label: "Odd" },
+      { value: "none", label: "None" },
+    ] },
+    { key: "stop_bits", label: "Stop bits (Modbus RTU)", type: "select", options: [
+      { value: "one", label: "1" },
+      { value: "two", label: "2" },
+    ] },
     { key: "unit_id", label: "Unit ID (Modbus)", type: "number" },
     { key: "scan_rate_ms", label: "Scan rate, ms (Modbus)", type: "number" },
     { key: "endpoint", label: "Endpoint URL (OPC UA)", type: "text", placeholder: "opc.tcp://host:4840" },

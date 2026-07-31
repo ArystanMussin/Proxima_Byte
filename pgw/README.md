@@ -1,11 +1,12 @@
 # PGW — Protocol Gateway
 
-Modbus TCP + OPC UA → единое пространство тегов → Modbus TCP Server. Реализация v0.1 по `TZ_protocol_gateway_v0_1.md`.
+Modbus TCP/RTU + OPC UA → единое пространство тегов → Modbus TCP Server. Реализация v0.1 по
+`TZ_protocol_gateway_v0_1.md`.
 
 ```
-Modbus TCP Client ──┐                      ┌── Modbus TCP Server
-                     ├──▶ Tag Space (core) ─┤
-OPC UA Client     ───┘   (value+quality     └── (REST /runtime, /config)
+Modbus TCP Client  ──┐                      ┌── Modbus TCP Server
+Modbus RTU Client  ──┼──▶ Tag Space (core) ─┤
+OPC UA Client      ──┘   (value+quality     └── (REST /runtime, /config)
                           +timestamp)
 ```
 
@@ -18,7 +19,9 @@ OPC UA Client     ───┘   (value+quality     └── (REST /runtime, /c
 
 ```
 src/PGW.Core            — Tag Space, контракты, конфиг, YAML-загрузчик, cross-platform пути
-src/PGW.Drivers.Modbus   — Modbus TCP Client (master) + Modbus TCP Server (slave)
+src/PGW.Drivers.Modbus   — Modbus TCP/RTU Client (master, общая логика опроса на общем
+                           ModbusClientDriverBase — FluentModbus.ModbusClient — разное только открытие
+                           соединения) + Modbus TCP Server (slave)
 src/PGW.Drivers.OpcUa    — OPC UA Client
 src/PGW.Simulator        — встроенные симулированные Modbus TCP / OPC UA серверы (`pgw simulate`,
                            см. "Быстрый просмотр" ниже) — тестировать без реального железа
@@ -107,6 +110,43 @@ dotnet test PGW.sln
 (Windows); переопределяется переменной `PGW_CONFIG`.
 
 Пароли — только через `password_env: ИМЯ_ПЕРЕМЕННОЙ` в конфиге OPC UA `security:`, не текстом в YAML.
+
+### Modbus RTU (RS-485/serial) — `driver: modbus_rtu_client`
+
+Тот же протокол Modbus, что и `modbus_tcp_client` (те же `area`/`address`/`type` в тегах, тот же
+`ModbusCodec`, тот же общий цикл опроса — `ModbusClientDriverBase` работает через абстрактный
+`FluentModbus.ModbusClient`, у которого что TCP-, что RTU-клиент реализуют все методы чтения/записи
+одинаково), просто вместо TCP-сокета — последовательный порт. Это то, чем на практике говорит
+подавляющее большинство счётчиков и контроллеров на объекте — TCP там, где стоит современный
+Ethernet-шлюз/ПЛК, RTU — почти везде ещё.
+
+```yaml
+sources:
+  - name: energy_meter_1
+    driver: modbus_rtu_client
+    serial_port: /dev/ttyUSB0      # Windows: COM3 и т.п. — не "port" (см. ниже, почему)
+    baud_rate: 9600
+    parity: even                   # even (по умолчанию) | odd | none
+    stop_bits: one                 # one (по умолчанию) | two
+    unit_id: 3                     # адрес устройства на шине RS-485
+    scan_rate_ms: 2000             # RS-485 — общая полудуплексная шина, обычно опрашивают реже TCP
+    tags:
+      - {name: active_energy, area: HR, address: 0, type: float32, units: "kWh"}
+```
+
+Поле называется `serial_port`, а не `port` — потому что `port` уже занято числовым TCP-портом у
+`modbus_tcp_client`, а форма источника в панели показывает поля обеих схем сразу (см. "Веб-панель"
+ниже); одно имя поля под строку "COM3" и под число 502 сразу не разъехалось бы. `inter_request_delay_ms`
+по умолчанию 20 (не 0, как у TCP) — RS-485 обычно общая шина на несколько устройств, между запросами
+стоит выдерживать паузу, а не бомбардировать её как отдельный TCP-сокет.
+
+Проверено на реальном протоколе Modbus RTU (framing + CRC16 через настоящие `FluentModbus.ModbusRtuClient`/
+`ModbusRtuServer`), но без физического COM-порта — виртуализирован только транспорт (петлевой TCP-сокет
+вместо `System.IO.Ports.SerialPort`, `FluentModbus.IModbusRtuSerialPort` это и позволяет), сама логика
+опроса/кодирования — тот же код, что реально работает с настоящим портом
+(`tests/PGW.Core.Tests/ModbusRtuTests.cs`). Перед реальным вводом в эксплуатацию всё равно стоит
+проверить с конкретным устройством на реальном порту/кабеле — таймауты и электрика RS-485 на практике
+не то же самое, что loopback-тест.
 
 ## REST API (§14.2)
 

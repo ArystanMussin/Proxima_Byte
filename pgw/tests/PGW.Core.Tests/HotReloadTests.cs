@@ -93,11 +93,16 @@ public class HotReloadTests
         await engine.StartAsync(cts.Token);
 
         // A SCADA client connects and stays connected across the reload below — this is the socket
-        // that must survive.
-        using var scada = new ModbusTcpClient();
+        // that must survive. StartAsync returns once drivers are connected, but the first poll tick
+        // (and thus the output's register buffer) runs concurrently in the background, so wait for it
+        // rather than racing it.
+        using var scada = new ModbusTcpClient { ReadTimeout = 2000 };
         scada.Connect(new IPEndPoint(IPAddress.Loopback, scadaPort));
-        var before = (await scada.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token)).ToArray();
-        Assert.Equal((ushort)1234, before[0]);
+        await TestUtil.WaitUntilAsync(() =>
+        {
+            var v = scada.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token).GetAwaiter().GetResult().ToArray();
+            return v[0] == 1234;
+        }, TimeSpan.FromSeconds(3));
 
         // Change only the source's scan rate — the output's config is byte-for-byte identical.
         WriteConfig(configPath, plcPort, scadaPort, scanRateMs: 250);
@@ -139,9 +144,13 @@ public class HotReloadTests
         using var cts = new CancellationTokenSource();
         await engine.StartAsync(cts.Token);
 
-        using var oldScada = new ModbusTcpClient { ReadTimeout = 800 };
+        using var oldScada = new ModbusTcpClient { ReadTimeout = 2000 };
         oldScada.Connect(new IPEndPoint(IPAddress.Loopback, scadaPort));
-        Assert.Equal((ushort)42, (await oldScada.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token)).ToArray()[0]);
+        await TestUtil.WaitUntilAsync(() =>
+        {
+            var v = oldScada.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token).GetAwaiter().GetResult().ToArray();
+            return v[0] == 42;
+        }, TimeSpan.FromSeconds(3));
 
         // Move the output to a different port — this output's config genuinely changed.
         WriteConfig(configPath, plcPort, newScadaPort, scanRateMs: 200);

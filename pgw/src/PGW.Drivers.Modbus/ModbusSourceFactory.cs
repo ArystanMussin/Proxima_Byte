@@ -28,8 +28,22 @@ public static class ModbusSourceFactory
             GapTolerance: s.GetInt("block_gap_tolerance", 5));
 
         var device = new DeviceHandle(src.Name, src.Name);
-        var defaultScanRate = s.GetInt("scan_rate_ms", 1000);
+        var parsed = ParseTags(src, device, oneBased, defaultOrder, s.GetInt("scan_rate_ms", 1000), cfg.GapTolerance);
 
+        var driver = ModbusClientDriverFactory.CreateTcp(cfg, parsed.BlocksByScanRate, parsed.WireByAddr, parsed.AllTagIds, log);
+        return (driver, device, parsed.Defs);
+    }
+
+    /// <summary>The register-addressing/tag-modeling half of building a Modbus source — identical for
+    /// every transport (TCP, RTU, ...), since it has nothing to do with how bytes reach the wire.</summary>
+    internal readonly record struct ParsedTags(
+        List<(TagDefinition Def, TagAddress Addr)> Defs,
+        Dictionary<string, TagWireInfo> WireByAddr,
+        Dictionary<int, List<ReadBlock>> BlocksByScanRate,
+        List<string> AllTagIds);
+
+    internal static ParsedTags ParseTags(SourceConfig src, DeviceHandle device, bool oneBased, WordOrder defaultOrder, int defaultScanRate, int gapTolerance)
+    {
         var defs = new List<(TagDefinition, TagAddress)>();
         var wireByAddr = new Dictionary<string, TagWireInfo>();
         var perScanRate = new Dictionary<int, List<(string TagId, ModbusAddress Addr, TagDataType Type)>>();
@@ -64,11 +78,9 @@ public static class ModbusSourceFactory
             list.Add((tagId, addr, type));
         }
 
-        var blocksByScanRate = perScanRate.ToDictionary(kv => kv.Key, kv => ModbusBlockPlanner.Plan(kv.Value, cfg.GapTolerance));
+        var blocksByScanRate = perScanRate.ToDictionary(kv => kv.Key, kv => ModbusBlockPlanner.Plan(kv.Value, gapTolerance));
         var allTagIds = defs.Select(d => d.Item1.Id).ToList();
-
-        var driver = new ModbusTcpClientDriver(cfg, blocksByScanRate, wireByAddr, allTagIds, log);
-        return (driver, device, defs);
+        return new ParsedTags(defs, wireByAddr, blocksByScanRate, allTagIds);
     }
 
     public static WordOrder ParseWordOrder(string? s, WordOrder fallback) =>

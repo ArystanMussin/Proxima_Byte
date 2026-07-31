@@ -3,11 +3,13 @@ using PGW.Core;
 
 namespace PGW.Drivers.Modbus;
 
-public sealed record ModbusDeviceSettings(
-    string Host,
-    int Port = 502,
+public sealed record TagWireInfo(TagDataType Type, WordOrder Order);
+
+/// <summary>Polling/retry knobs shared by every Modbus master transport (§4) — everything except
+/// "how to open/close the physical connection", which is transport-specific (TCP endpoint vs. serial
+/// port/baud/parity).</summary>
+public sealed record ModbusPollSettings(
     byte UnitId = 1,
-    int ConnectTimeoutMs = 2000,
     int TimeoutMs = 1000,
     int Retries = 2,
     int InterRequestDelayMs = 0,
@@ -19,20 +21,27 @@ public sealed record ModbusDeviceSettings(
     bool OneBased = false,
     int GapTolerance = 5);
 
-public sealed record TagWireInfo(TagDataType Type, WordOrder Order);
-
-/// <summary>Modbus TCP master (§4). One instance = one physical device / TCP connection.</summary>
-public sealed class ModbusTcpClientDriver : IProtocolDriver
+/// <summary>
+/// Modbus master (§4), transport-agnostic. FluentModbus's <see cref="ModbusClient"/> is an abstract base
+/// that <c>ModbusTcpClient</c> and <c>ModbusRtuClient</c> both implement identically for every
+/// read/write method used here — the only thing that differs between TCP and serial is how the
+/// connection itself opens and closes, which callers inject as two small delegates
+/// (<see cref="ModbusClientDriverFactory"/> builds those for each concrete transport). One instance =
+/// one physical device / connection.
+/// </summary>
+public sealed class ModbusClientDriverBase : IProtocolDriver
 {
-    public string DriverTypeId => "modbus_tcp_client";
+    public string DriverTypeId { get; }
     public DriverCapabilities Capabilities { get; } = new(SupportsWrite: true, SupportsBrowse: false, SupportsSubscription: false);
 
-    private readonly ModbusDeviceSettings _cfg;
+    private readonly ModbusClient _client;
+    private readonly Func<ModbusClient, CancellationToken, Task> _connect;
+    private readonly Action<ModbusClient> _disconnect;
+    private readonly ModbusPollSettings _cfg;
     private readonly IReadOnlyDictionary<int, List<ReadBlock>> _blocksByScanRate;
     private readonly IReadOnlyDictionary<string, TagWireInfo> _wireByNativeAddress;
     private readonly IReadOnlyList<string> _allTagIds;
     private readonly RingLog _log;
-    private readonly ModbusTcpClient _client = new();
     private readonly SemaphoreSlim _io = new(1, 1);
 
     private long _errorCount;
@@ -42,9 +51,15 @@ public sealed class ModbusTcpClientDriver : IProtocolDriver
     private int _reconnectDelayMs;
     private DateTime _demotedUntil = DateTime.MinValue;
 
-    public ModbusTcpClientDriver(ModbusDeviceSettings cfg, IReadOnlyDictionary<int, List<ReadBlock>> blocksByScanRate,
+    public ModbusClientDriverBase(string driverTypeId, ModbusClient client,
+        Func<ModbusClient, CancellationToken, Task> connect, Action<ModbusClient> disconnect,
+        ModbusPollSettings cfg, IReadOnlyDictionary<int, List<ReadBlock>> blocksByScanRate,
         IReadOnlyDictionary<string, TagWireInfo> wireByNativeAddress, IReadOnlyList<string> allTagIds, RingLog log)
     {
+        DriverTypeId = driverTypeId;
+        _client = client;
+        _connect = connect;
+        _disconnect = disconnect;
         _cfg = cfg;
         _blocksByScanRate = blocksByScanRate;
         _wireByNativeAddress = wireByNativeAddress;
@@ -57,13 +72,7 @@ public sealed class ModbusTcpClientDriver : IProtocolDriver
     {
         try
         {
-            _client.ConnectTimeout = _cfg.ConnectTimeoutMs;
-            _client.ReadTimeout = _cfg.TimeoutMs;
-            _client.WriteTimeout = _cfg.TimeoutMs;
-            var ip = System.Net.IPAddress.TryParse(_cfg.Host, out var addr)
-                ? addr
-                : (await System.Net.Dns.GetHostAddressesAsync(_cfg.Host, ct)).First();
-            await Task.Run(() => _client.Connect(new System.Net.IPEndPoint(ip, _cfg.Port)), ct);
+            await _connect(_client, ct);
             _reconnectDelayMs = _cfg.ReconnectMinMs;
             _log.Add(device.ToString(), "connected");
             return DriverConnectResult.Success;
@@ -78,7 +87,7 @@ public sealed class ModbusTcpClientDriver : IProtocolDriver
 
     public Task DisconnectAsync(DeviceHandle device, CancellationToken ct)
     {
-        if (_client.IsConnected) _client.Disconnect();
+        if (_client.IsConnected) _disconnect(_client);
         return Task.CompletedTask;
     }
 
@@ -165,7 +174,7 @@ public sealed class ModbusTcpClientDriver : IProtocolDriver
                 _log.Add(block.Area.ToString(), $"device demoted for {_cfg.AutoDemoteSeconds}s after {_consecutiveFailures} failures: {ex.Message}", "WARN");
                 foreach (var tagId in _allTagIds)
                     sink.Publish(tagId, null, TagQuality.Bad, now, QualitySubCode.CommFailure);
-                if (_client.IsConnected) _client.Disconnect();
+                if (_client.IsConnected) _disconnect(_client);
             }
         }
         finally

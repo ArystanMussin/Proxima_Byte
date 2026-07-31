@@ -18,7 +18,7 @@ public sealed class GatewayEngine
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
     public int ConfigVersion { get; private set; }
 
-    private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, OpcUaSourceFactory.TypeId };
+    private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, ModbusRtuSourceFactory.TypeId, OpcUaSourceFactory.TypeId };
     private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
 
     private sealed record DriverEntry(SourceConfig Config, IProtocolDriver Driver, DeviceHandle Device, List<string> TagIds);
@@ -130,6 +130,7 @@ public sealed class GatewayEngine
             var (driver, device, tags) = src.Driver switch
             {
                 ModbusSourceFactory.TypeId => ModbusSourceFactory.Build(src, EventLog),
+                ModbusRtuSourceFactory.TypeId => ModbusRtuSourceFactory.Build(src, EventLog),
                 OpcUaSourceFactory.TypeId => OpcUaSourceFactory.Build(src, EventLog, _paths),
                 _ => throw new NotSupportedException($"unknown driver '{src.Driver}'"),
             };
