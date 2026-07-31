@@ -317,69 +317,122 @@ function renderCfgOutputs() {
   }
 }
 
-// ---- Field specs (kept deliberately flat: both driver's fields shown together, unused ones are
-// simply not sent — far less code than a dynamic show/hide-by-driver form). ----
+// ---- Field specs, per driver: the source/tag form only shows fields relevant to the selected
+// driver (plus a common name/type prefix and an __extra/units suffix) — no more one flat list with
+// every driver's fields mixed together and "(Driver Name)" suffixes to tell them apart. ----
 
-function sourceFields() {
-  return [
-    { key: "name", label: "Имя источника", type: "text" },
-    { key: "driver", label: "Драйвер", type: "select", options: [
-      { value: "modbus_tcp_client", label: "Modbus TCP Client" },
-      { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
-      { value: "mercury_client", label: "Меркурий (RS-485, счётчики электроэнергии)" },
-      { value: "iec104_client", label: "IEC 60870-5-104 (SCADA/телемеханика)" },
-      { value: "dlms_client", label: "DLMS/COSEM (счётчики, TCP-wrapper)" },
-      { value: "opcua_client", label: "OPC UA Client" },
+const SOURCE_DRIVER_OPTIONS = [
+  { value: "modbus_tcp_client", label: "Modbus TCP Client" },
+  { value: "modbus_rtu_client", label: "Modbus RTU (RS-485/serial)" },
+  { value: "mercury_client", label: "Меркурий (RS-485, счётчики электроэнергии)" },
+  { value: "iec104_client", label: "IEC 60870-5-104 (SCADA/телемеханика)" },
+  { value: "dlms_client", label: "DLMS/COSEM (счётчики, TCP-wrapper)" },
+  { value: "opcua_client", label: "OPC UA Client" },
+];
+
+const SOURCE_COMMON_PREFIX_FIELDS = [
+  { key: "name", label: "Имя источника", type: "text" },
+  { key: "driver", label: "Драйвер", type: "select", options: SOURCE_DRIVER_OPTIONS },
+];
+
+const MODBUS_SERIAL_FIELDS = [
+  { key: "serial_port", label: "Serial port", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
+  { key: "baud_rate", label: "Baud rate", type: "number", placeholder: "9600" },
+  { key: "parity", label: "Parity", type: "select", options: [
+    { value: "even", label: "Even" }, { value: "odd", label: "Odd" }, { value: "none", label: "None" },
+  ] },
+  { key: "stop_bits", label: "Stop bits", type: "select", options: [{ value: "one", label: "1" }, { value: "two", label: "2" }] },
+];
+
+const SOURCE_FIELDS_BY_DRIVER = {
+  modbus_tcp_client: [
+    { key: "host", label: "Host/IP", type: "text" },
+    { key: "port", label: "Port", type: "number", placeholder: "502" },
+    { key: "unit_id", label: "Unit ID", type: "number", placeholder: "1" },
+    { key: "scan_rate_ms", label: "Scan rate, ms", type: "number", placeholder: "1000" },
+  ],
+  modbus_rtu_client: [
+    ...MODBUS_SERIAL_FIELDS,
+    { key: "unit_id", label: "Unit ID / адрес на шине", type: "number", placeholder: "1" },
+    { key: "scan_rate_ms", label: "Scan rate, ms", type: "number", placeholder: "2000" },
+  ],
+  mercury_client: [
+    ...MODBUS_SERIAL_FIELDS,
+    { key: "unit_id", label: "Адрес счётчика на шине", type: "number", placeholder: "1" },
+    { key: "access_level", label: "Уровень доступа", type: "select", options: [
+      { value: "1", label: "1 — чтение (по умолчанию)" }, { value: "2", label: "2 — админ" },
     ] },
-    { key: "host", label: "Host/IP (Modbus TCP / IEC 104 / DLMS)", type: "text" },
-    { key: "port", label: "Port (Modbus TCP / IEC 104 = 2404 / DLMS = 4059)", type: "number" },
-    { key: "common_address", label: "Common Address ASDU (IEC 104)", type: "number", placeholder: "1" },
-    { key: "interrogation_interval_ms", label: "Интервал общего опроса, ms (IEC 104)", type: "number", placeholder: "30000" },
-    { key: "logical_device_address", label: "Logical Device Address (DLMS)", type: "number", placeholder: "1" },
-    { key: "client_address", label: "Client Address (DLMS)", type: "number", placeholder: "1" },
-    { key: "security", label: "Security (DLMS)", type: "select", options: [
-      { value: "none", label: "none — без пароля" },
-      { value: "lls", label: "lls — Low Level Security (пароль)" },
+    { key: "password", label: "Пароль, 6 цифр (необязательно)", type: "text", placeholder: "по умолчанию для уровня 1" },
+    { key: "scan_rate_ms", label: "Scan rate, ms", type: "number", placeholder: "5000" },
+  ],
+  iec104_client: [
+    { key: "host", label: "Host/IP", type: "text" },
+    { key: "port", label: "Port", type: "number", placeholder: "2404" },
+    { key: "common_address", label: "Common Address ASDU", type: "number", placeholder: "1" },
+    { key: "interrogation_interval_ms", label: "Интервал общего опроса, ms", type: "number", placeholder: "30000" },
+  ],
+  dlms_client: [
+    { key: "host", label: "Host/IP", type: "text" },
+    { key: "port", label: "Port", type: "number", placeholder: "4059" },
+    { key: "logical_device_address", label: "Logical Device Address", type: "number", placeholder: "1" },
+    { key: "client_address", label: "Client Address", type: "number", placeholder: "1" },
+    { key: "security", label: "Security", type: "select", options: [
+      { value: "none", label: "none — без пароля" }, { value: "lls", label: "lls — Low Level Security (пароль)" },
     ] },
-    { key: "serial_port", label: "Serial port (Modbus RTU / Меркурий)", type: "text", placeholder: "COM3 или /dev/ttyUSB0" },
-    { key: "baud_rate", label: "Baud rate (Modbus RTU / Меркурий)", type: "number", placeholder: "9600" },
-    { key: "parity", label: "Parity (Modbus RTU / Меркурий)", type: "select", options: [
-      { value: "even", label: "Even" },
-      { value: "odd", label: "Odd" },
-      { value: "none", label: "None" },
-    ] },
-    { key: "stop_bits", label: "Stop bits (Modbus RTU / Меркурий)", type: "select", options: [
-      { value: "one", label: "1" },
-      { value: "two", label: "2" },
-    ] },
-    { key: "unit_id", label: "Unit ID / адрес (Modbus / Меркурий)", type: "number" },
-    { key: "access_level", label: "Уровень доступа (Меркурий)", type: "select", options: [
-      { value: "1", label: "1 — чтение (по умолчанию)" },
-      { value: "2", label: "2 — админ" },
-    ] },
-    { key: "password", label: "Пароль (Меркурий — 6 цифр; DLMS LLS — произвольная строка)", type: "text", placeholder: "необязательно" },
-    { key: "scan_rate_ms", label: "Scan rate, ms (Modbus / Меркурий / DLMS)", type: "number" },
-    { key: "endpoint", label: "Endpoint URL (OPC UA)", type: "text", placeholder: "opc.tcp://host:4840" },
-    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"timeout_ms": 1000, "retries": 2}' },
-  ];
+    { key: "password", label: "Пароль (только при security: lls)", type: "text", placeholder: "необязательно" },
+    { key: "scan_rate_ms", label: "Scan rate, ms", type: "number", placeholder: "10000" },
+  ],
+  opcua_client: [
+    { key: "endpoint", label: "Endpoint URL", type: "text", placeholder: "opc.tcp://host:4840" },
+  ],
+};
+
+const SOURCE_EXTRA_SUFFIX_FIELDS = [
+  { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"timeout_ms": 1000, "retries": 2}' },
+];
+
+function sourceFieldsFor(driver) {
+  return [...SOURCE_COMMON_PREFIX_FIELDS, ...(SOURCE_FIELDS_BY_DRIVER[driver] ?? []), ...SOURCE_EXTRA_SUFFIX_FIELDS];
 }
 
-function tagFields() {
-  return [
-    { key: "name", label: "Имя тега", type: "text" },
-    { key: "type", label: "Тип", type: "select", options: TYPE_OPTIONS },
+const TAG_COMMON_PREFIX_FIELDS = [
+  { key: "name", label: "Имя тега", type: "text" },
+  { key: "type", label: "Тип", type: "select", options: TYPE_OPTIONS },
+];
+
+const MODBUS_TAG_FIELDS = [
+  { key: "access", label: "Доступ", type: "select", options: [{ value: "RO", label: "RO" }, { value: "RW", label: "RW" }] },
+  { key: "area", label: "Область", type: "select", options: AREA_OPTIONS },
+  { key: "address", label: "Адрес", type: "number" },
+];
+
+const TAG_FIELDS_BY_DRIVER = {
+  modbus_tcp_client: MODBUS_TAG_FIELDS,
+  modbus_rtu_client: MODBUS_TAG_FIELDS,
+  mercury_client: [
+    { key: "param", label: "Параметр", type: "select", options: MERCURY_PARAM_OPTIONS },
+  ],
+  iec104_client: [
+    { key: "ioa", label: "IOA — адрес объекта", type: "number" },
+  ],
+  dlms_client: [
+    { key: "obis", label: "OBIS-код", type: "text", placeholder: "1.0.1.8.0.255" },
+    { key: "class_id", label: "Class ID (по умолчанию 3 — Register)", type: "number", placeholder: "3" },
+    { key: "attribute_id", label: "Attribute ID (по умолчанию 2 — value)", type: "number", placeholder: "2" },
+  ],
+  opcua_client: [
     { key: "access", label: "Доступ", type: "select", options: [{ value: "RO", label: "RO" }, { value: "RW", label: "RW" }] },
-    { key: "area", label: "Область (Modbus)", type: "select", options: AREA_OPTIONS },
-    { key: "address", label: "Адрес (Modbus)", type: "number" },
-    { key: "node_id", label: "NodeId (OPC UA)", type: "text", placeholder: "ns=2;s=Device.Tag" },
-    { key: "param", label: "Параметр (Меркурий)", type: "select", options: MERCURY_PARAM_OPTIONS },
-    { key: "ioa", label: "IOA — адрес объекта (IEC 104)", type: "number" },
-    { key: "obis", label: "OBIS-код (DLMS)", type: "text", placeholder: "1.0.1.8.0.255" },
-    { key: "class_id", label: "Class ID (DLMS, по умолчанию 3 — Register)", type: "number", placeholder: "3" },
-    { key: "attribute_id", label: "Attribute ID (DLMS, по умолчанию 2 — value)", type: "number", placeholder: "2" },
-    { key: "units", label: "Единицы измерения", type: "text" },
-    { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
-  ];
+    { key: "node_id", label: "NodeId", type: "text", placeholder: "ns=2;s=Device.Tag" },
+  ],
+};
+
+const TAG_EXTRA_SUFFIX_FIELDS = [
+  { key: "units", label: "Единицы измерения", type: "text" },
+  { key: "__extra", label: "Доп. поля (JSON)", type: "textarea", placeholder: '{"deadband": 0.5, "write_min": 0, "write_max": 100}' },
+];
+
+function tagFieldsFor(driver) {
+  return [...TAG_COMMON_PREFIX_FIELDS, ...(TAG_FIELDS_BY_DRIVER[driver] ?? []), ...TAG_EXTRA_SUFFIX_FIELDS];
 }
 
 function outputFields() {
@@ -473,6 +526,50 @@ function openForm(title, fields, values, onSubmit) {
   dialog.showModal();
 }
 
+function readCurrentFormValues() {
+  const out = {};
+  for (const el of formEl.querySelectorAll("[data-key]")) {
+    out[el.dataset.key] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  return out;
+}
+
+// Like openForm, but the field list itself depends on the current value of one select field
+// (driverKey) — re-rendered every time that select changes, carrying forward whatever the user
+// already typed for fields that exist under both the old and new driver (e.g. scan_rate_ms).
+// Used for the source form, where "Драйвер" lives inside the same form it controls the shape of.
+function openDynamicForm({ title, driverKey, fieldsFor, values, onSubmit }) {
+  $("#form-title").textContent = title;
+  $("#form-error").hidden = true;
+  const box = $("#form-fields");
+
+  let currentValues = { ...values };
+
+  function render() {
+    const fields = fieldsFor(currentValues[driverKey]);
+    box.innerHTML = "";
+    for (const f of fields) box.appendChild(renderField(f, currentValues[f.key]));
+    box.querySelector(`[data-key="${driverKey}"]`).addEventListener("change", (e) => {
+      currentValues = { ...currentValues, ...readCurrentFormValues(), [driverKey]: e.target.value };
+      render();
+    });
+  }
+  render();
+
+  formEl.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const payload = collectForm(fieldsFor(currentValues[driverKey]));
+      await onSubmit(payload);
+      dialog.close();
+    } catch (err) {
+      $("#form-error").textContent = err.message || String(err);
+      $("#form-error").hidden = false;
+    }
+  };
+  dialog.showModal();
+}
+
 // ---- CRUD actions ----
 
 $("#add-source-btn").addEventListener("click", () => editSource(null));
@@ -480,10 +577,16 @@ $("#add-output-btn").addEventListener("click", () => editOutput(null));
 
 function editSource(existing) {
   const values = existing ? { ...existing, ...existing.settings } : { driver: "modbus_tcp_client" };
-  openForm(existing ? `Источник: ${existing.name}` : "Новый источник", sourceFields(), values, async (payload) => {
-    if (existing) await api("PUT", `/config/channels/${encodeURIComponent(existing.name)}`, payload);
-    else await api("POST", "/config/channels", payload);
-    await loadConfig();
+  openDynamicForm({
+    title: existing ? `Источник: ${existing.name}` : "Новый источник",
+    driverKey: "driver",
+    fieldsFor: sourceFieldsFor,
+    values,
+    onSubmit: async (payload) => {
+      if (existing) await api("PUT", `/config/channels/${encodeURIComponent(existing.name)}`, payload);
+      else await api("POST", "/config/channels", payload);
+      await loadConfig();
+    },
   });
 }
 
@@ -493,7 +596,7 @@ function deleteSource(s) {
 }
 
 function editTag(source, existing) {
-  openForm(existing ? `Тег: ${source.name}.${existing.name}` : `Новый тег в ${source.name}`, tagFields(), existing, async (payload) => {
+  openForm(existing ? `Тег: ${source.name}.${existing.name}` : `Новый тег в ${source.name}`, tagFieldsFor(source.driver), existing, async (payload) => {
     if (existing) await api("PUT", `/config/channels/${encodeURIComponent(source.name)}/tags/${encodeURIComponent(existing.name)}`, payload);
     else await api("POST", `/config/channels/${encodeURIComponent(source.name)}/tags`, payload);
     await loadConfig();
