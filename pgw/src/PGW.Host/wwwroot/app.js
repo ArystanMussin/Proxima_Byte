@@ -440,6 +440,22 @@ function editTag(source, existing) {
     else await api("POST", `/config/channels/${encodeURIComponent(source.name)}/tags`, payload);
     await loadConfig();
   });
+
+  // OPC UA tags need a NodeId, which is unguessable without seeing the server's address space —
+  // wire the already-built /config/opcua/browse endpoint into the form instead of leaving it
+  // reachable only via curl.
+  if (source.driver === "opcua_client") {
+    const nodeInput = document.querySelector('[data-key="node_id"]');
+    if (nodeInput) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "node-id-browse-btn";
+      btn.className = "icon-btn";
+      btn.textContent = "Обзор…";
+      btn.addEventListener("click", () => openBrowseDialog(source.name, (nodeId) => { nodeInput.value = nodeId; }));
+      nodeInput.insertAdjacentElement("afterend", btn);
+    }
+  }
 }
 
 function deleteTag(source, tag) {
@@ -619,3 +635,71 @@ $("#sc-disconnect").addEventListener("click", async () => {
   setScanStatus(true, "отключено");
   $("#sc-body").innerHTML = `<tr><td colspan="5" class="empty">нет данных — заполни адрес устройства и нажми «Опрос»</td></tr>`;
 });
+
+// ============================================================================================
+// OPC UA address-space browse — expandable tree over the existing /config/opcua/browse endpoint
+// (browses one level at a time, lazily, same as any real OPC UA client: eagerly recursing the
+// whole tree up front could mean thousands of requests against a big PLC address space).
+// ============================================================================================
+
+const browseDialog = $("#browse-dialog");
+$("#browse-close").addEventListener("click", () => browseDialog.close());
+
+function openBrowseDialog(sourceName, onSelect) {
+  const tree = $("#browse-tree");
+  tree.innerHTML = "";
+  browseDialog.showModal();
+  loadBrowseLevel(tree, sourceName, null, 0, onSelect);
+}
+
+async function loadBrowseLevel(container, sourceName, nodeId, depth, onSelect) {
+  container.innerHTML = `<div class="empty">загрузка…</div>`;
+  let nodes;
+  try {
+    nodes = await postJson("/config/opcua/browse", { source: sourceName, node_id: nodeId });
+  } catch (err) {
+    container.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    return;
+  }
+
+  container.innerHTML = "";
+  if (nodes.length === 0) { container.innerHTML = `<div class="empty">пусто</div>`; return; }
+
+  for (const n of nodes) container.appendChild(renderBrowseNode(n, sourceName, depth, onSelect));
+}
+
+function renderBrowseNode(n, sourceName, depth, onSelect) {
+  const wrap = document.createDocumentFragment();
+  const row = document.createElement("div");
+  row.className = "browse-row";
+  row.style.paddingLeft = `${8 + depth * 16}px`;
+  row.innerHTML = `
+    <span class="browse-caret">${n.hasChildren ? "▶" : "•"}</span>
+    <span class="browse-name">${esc(n.browseName)}</span>
+    <span class="browse-class">${esc(n.nodeClass)}</span>
+    <span class="browse-id">${esc(n.nodeId)}</span>
+    <button type="button" class="icon-btn" data-act="select">выбрать</button>`;
+
+  row.querySelector('[data-act="select"]').addEventListener("click", () => {
+    onSelect(n.nodeId, n.browseName);
+    browseDialog.close();
+  });
+
+  const childBox = document.createElement("div");
+  childBox.hidden = true;
+  if (n.hasChildren) {
+    const caret = row.querySelector(".browse-caret");
+    caret.addEventListener("click", async () => {
+      childBox.hidden = !childBox.hidden;
+      caret.textContent = childBox.hidden ? "▶" : "▼";
+      if (!childBox.hidden && !childBox.dataset.loaded) {
+        childBox.dataset.loaded = "1";
+        await loadBrowseLevel(childBox, sourceName, n.nodeId, depth + 1, onSelect);
+      }
+    });
+  }
+
+  wrap.appendChild(row);
+  wrap.appendChild(childBox);
+  return wrap;
+}

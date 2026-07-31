@@ -44,8 +44,7 @@ public sealed class OpcUaClientDriver : IProtocolDriver
         try
         {
             var appConfig = await OpcUaAppConfig.BuildAsync(device.Device, _cfg.CertsPath, _cfg.AutoAcceptUntrustedCertificates, ct);
-            var useSecurity = _cfg.SecurityMode != "None";
-            var endpoint = await Task.Run(() => CoreClientUtils.SelectEndpoint(appConfig, _cfg.EndpointUrl, useSecurity), ct);
+            var endpoint = await OpcUaEndpointSelector.SelectAsync(appConfig, _cfg.EndpointUrl, _cfg.SecurityMode, _cfg.SecurityPolicy, _log, device.ToString(), ct);
             var configuredEndpoint = new ConfiguredEndpoint(null, endpoint, EndpointConfiguration.Create(appConfig));
 
             IUserIdentity identity = _cfg.AuthMode == OpcUaAuthMode.UsernamePassword
