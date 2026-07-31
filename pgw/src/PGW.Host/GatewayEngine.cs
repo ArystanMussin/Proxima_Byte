@@ -21,10 +21,12 @@ public sealed class GatewayEngine
     private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, OpcUaSourceFactory.TypeId };
     private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
 
+    private sealed record DriverEntry(SourceConfig Config, IProtocolDriver Driver, DeviceHandle Device, List<string> TagIds);
+
     private readonly IPathProvider _paths;
     private readonly string _configPath;
-    private readonly List<(IProtocolDriver Driver, DeviceHandle Device)> _drivers = new();
-    private readonly List<(OutputConfig Output, IProtocolInterface Interface)> _interfaces = new();
+    private readonly Dictionary<string, DriverEntry> _driverEntries = new();
+    private readonly Dictionary<string, (OutputConfig Config, IProtocolInterface Interface)> _interfaceEntries = new();
     private readonly object _configLock = new();
     private CancellationTokenSource _runCts = new();
     private CancellationToken _hostCt;
@@ -61,47 +63,7 @@ public sealed class GatewayEngine
         var ct = _runCts.Token;
 
         RegisterSystemTags();
-
-        foreach (var src in Config.Sources)
-        {
-            var (driver, device, tags) = src.Driver switch
-            {
-                ModbusSourceFactory.TypeId => ModbusSourceFactory.Build(src, EventLog),
-                OpcUaSourceFactory.TypeId => OpcUaSourceFactory.Build(src, EventLog, _paths),
-                _ => throw new NotSupportedException($"unknown driver '{src.Driver}'"),
-            };
-            foreach (var (def, addr) in tags) TagSpace.Register(def, driver, addr);
-            _drivers.Add((driver, device));
-        }
-
-        if (Config.Gateway.PersistLastValues)
-            TagPersistence.Restore(TagSpace, LastValuesPath);
-
-        foreach (var (driver, device) in _drivers)
-        {
-            var result = await driver.ConnectAsync(device, ct);
-            EventLog.Add(device.ToString(), result.Ok ? "connected" : $"connect failed: {result.Error}", result.Ok ? "INFO" : "ERROR");
-            _ = driver.StartPollingAsync(device, TagSpace, ct).ContinueWith(t =>
-            {
-                if (t.IsFaulted && !ct.IsCancellationRequested)
-                    EventLog.Add(device.ToString(), $"polling stopped: {t.Exception?.GetBaseException().Message}", "ERROR");
-            }, TaskScheduler.Default);
-        }
-
-        foreach (var o in Config.Outputs)
-        {
-            switch (o.Interface)
-            {
-                case ModbusOutputFactory.TypeId:
-                    var (iface, _, errors) = ModbusOutputFactory.Build(o, CoreWriteAsync, EventLog);
-                    foreach (var e in errors) EventLog.Add(o.Name, e, "ERROR");
-                    await iface.StartAsync(TagSpace, ct);
-                    _interfaces.Add((o, iface));
-                    break;
-                default:
-                    throw new NotSupportedException($"unknown interface '{o.Interface}'");
-            }
-        }
+        await ReconcileAsync(previous: null, ct);
 
         ConfigVersion++;
         _ = RunSystemTagsLoopAsync(ct);
@@ -112,26 +74,121 @@ public sealed class GatewayEngine
     public async Task StopAsync()
     {
         await _runCts.CancelAsync();
-        foreach (var (_, iface) in _interfaces) await iface.StopAsync(default);
-        foreach (var (driver, device) in _drivers) await driver.DisconnectAsync(device, default);
-        _interfaces.Clear();
-        _drivers.Clear();
+        foreach (var (_, iface) in _interfaceEntries.Values) await iface.StopAsync(default);
+        foreach (var entry in _driverEntries.Values) await entry.Driver.DisconnectAsync(entry.Device, default);
+        _interfaceEntries.Clear();
+        _driverEntries.Clear();
 
         if (Config.Gateway.PersistLastValues)
             TagPersistence.Save(TagSpace, LastValuesPath);
     }
 
     /// <summary>
-    /// §7.3/§14.3: reload without disrupting configuration correctness is guaranteed; reload without
-    /// disrupting already-open Modbus TCP client sockets is a v0.1 simplification — see README.
+    /// §7.3/§14.3: reconciles against the running state instead of a full stop/start — a source or
+    /// output whose config content is byte-for-byte unchanged keeps its live driver connection /
+    /// already-open Modbus TCP Server socket untouched, so editing one tag doesn't drop every SCADA
+    /// client currently polling an unrelated output. Only entities that actually changed (or were
+    /// added/removed) get stopped and rebuilt.
     /// </summary>
     public async Task<List<string>> ReloadAsync()
     {
+        var previous = Config;
         var errors = LoadAndValidate();
         if (errors.Count > 0) return errors;
-        await StopAsync();
-        await StartAsync(_hostCt);
+
+        await ReconcileAsync(previous, _hostCt);
+        ConfigVersion++;
         return errors;
+    }
+
+    private async Task ReconcileAsync(GatewayProjectConfig? previous, CancellationToken ct)
+    {
+        var newSources = Config.Sources.ToDictionary(s => s.Name);
+        var newOutputs = Config.Outputs.ToDictionary(o => o.Name);
+
+        // Stop/unregister sources that vanished or changed — before building anything new, so a
+        // renamed-then-reused address or a changed port on the same name can't collide with what's
+        // still running.
+        foreach (var (name, entry) in _driverEntries.ToList())
+        {
+            if (newSources.TryGetValue(name, out var stillWanted) && ConfigDiff.ContentEquals(entry.Config, stillWanted))
+                continue; // unchanged — leave the live connection alone
+
+            await entry.Driver.DisconnectAsync(entry.Device, CancellationToken.None);
+            foreach (var tagId in entry.TagIds) TagSpace.Unregister(tagId);
+            _driverEntries.Remove(name);
+            EventLog.Add(entry.Device.ToString(), "reload: stopped (source removed or changed)", "INFO");
+        }
+
+        // Build + register tags for sources that are new or changed; don't connect yet — persisted
+        // last-values (cold start only) must land before the first live poll can overwrite them.
+        var toConnect = new List<DriverEntry>();
+        foreach (var src in Config.Sources)
+        {
+            if (_driverEntries.ContainsKey(src.Name)) continue;
+
+            var (driver, device, tags) = src.Driver switch
+            {
+                ModbusSourceFactory.TypeId => ModbusSourceFactory.Build(src, EventLog),
+                OpcUaSourceFactory.TypeId => OpcUaSourceFactory.Build(src, EventLog, _paths),
+                _ => throw new NotSupportedException($"unknown driver '{src.Driver}'"),
+            };
+            var tagIds = new List<string>(tags.Count);
+            foreach (var (def, addr) in tags)
+            {
+                TagSpace.Register(def, driver, addr);
+                tagIds.Add(def.Id);
+            }
+            var entry = new DriverEntry(src, driver, device, tagIds);
+            _driverEntries[src.Name] = entry;
+            toConnect.Add(entry);
+            RegisterSourceSystemTags(src);
+        }
+
+        if (previous is null && Config.Gateway.PersistLastValues)
+            TagPersistence.Restore(TagSpace, LastValuesPath);
+
+        foreach (var entry in toConnect)
+        {
+            var result = await entry.Driver.ConnectAsync(entry.Device, ct);
+            EventLog.Add(entry.Device.ToString(), result.Ok ? "connected" : $"connect failed: {result.Error}", result.Ok ? "INFO" : "ERROR");
+            var device = entry.Device;
+            _ = entry.Driver.StartPollingAsync(device, TagSpace, ct).ContinueWith(t =>
+            {
+                if (t.IsFaulted && !ct.IsCancellationRequested)
+                    EventLog.Add(device.ToString(), $"polling stopped: {t.Exception?.GetBaseException().Message}", "ERROR");
+            }, TaskScheduler.Default);
+        }
+
+        // Same two-phase pattern for outputs: stop/rebuild only what changed, leaving unaffected Modbus
+        // TCP Server sockets (and every client currently connected to them) running the whole time.
+        foreach (var (name, entry) in _interfaceEntries.ToList())
+        {
+            if (newOutputs.TryGetValue(name, out var stillWanted) && ConfigDiff.ContentEquals(entry.Config, stillWanted))
+                continue;
+
+            await entry.Interface.StopAsync(CancellationToken.None);
+            _interfaceEntries.Remove(name);
+            EventLog.Add(name, "reload: stopped (output removed or changed)", "INFO");
+        }
+
+        foreach (var o in Config.Outputs)
+        {
+            if (_interfaceEntries.ContainsKey(o.Name)) continue;
+
+            switch (o.Interface)
+            {
+                case ModbusOutputFactory.TypeId:
+                    var (iface, _, errors) = ModbusOutputFactory.Build(o, CoreWriteAsync, EventLog);
+                    foreach (var e in errors) EventLog.Add(o.Name, e, "ERROR");
+                    await iface.StartAsync(TagSpace, ct);
+                    _interfaceEntries[o.Name] = (o, iface);
+                    RegisterOutputSystemTags(o);
+                    break;
+                default:
+                    throw new NotSupportedException($"unknown interface '{o.Interface}'");
+            }
+        }
     }
 
     // ---- Config editing (§14.2 write side) ----------------------------------------------------
@@ -255,29 +312,33 @@ public sealed class GatewayEngine
 
     private string LastValuesPath => Path.Combine(_paths.DataDir, "last_values.json");
 
+    private static readonly SystemDriver SystemTagOwner = new();
+    private static readonly DeviceHandle SystemDevice = new("_System", "_System");
+
+    private static void RegSystemTag(TagSpace tagSpace, string id, TagDataType type) =>
+        tagSpace.Register(new TagDefinition(id, type, TagAccess.RO, SystemDevice, id), SystemTagOwner, new TagAddress(SystemDevice, id));
+
     private void RegisterSystemTags()
     {
-        var owner = new SystemDriver();
-        var dev = new DeviceHandle("_System", "_System");
-        void Reg(string id, TagDataType type) =>
-            TagSpace.Register(new TagDefinition(id, type, TagAccess.RO, dev, id), owner, new TagAddress(dev, id));
+        RegSystemTag(TagSpace, "_System.uptime_s", TagDataType.Int64);
+        RegSystemTag(TagSpace, "_System.heartbeat", TagDataType.Int64);
+        RegSystemTag(TagSpace, "_System.config_version", TagDataType.Int32);
+    }
 
-        Reg("_System.uptime_s", TagDataType.Int64);
-        Reg("_System.heartbeat", TagDataType.Int64);
-        Reg("_System.config_version", TagDataType.Int32);
+    /// <summary>Called once per source, both at cold start and whenever reload adds/recreates one (§7.3)
+    /// — without this, a source added via a later reload would never get its health tags registered.</summary>
+    private void RegisterSourceSystemTags(SourceConfig s)
+    {
+        RegSystemTag(TagSpace, $"_System.{s.Name}.connected", TagDataType.Bool);
+        RegSystemTag(TagSpace, $"_System.{s.Name}.error_count", TagDataType.Int64);
+        RegSystemTag(TagSpace, $"_System.{s.Name}.last_error_code", TagDataType.String);
+    }
 
-        foreach (var s in Config.Sources)
-        {
-            Reg($"_System.{s.Name}.connected", TagDataType.Bool);
-            Reg($"_System.{s.Name}.error_count", TagDataType.Int64);
-            Reg($"_System.{s.Name}.last_error_code", TagDataType.String);
-        }
-        foreach (var o in Config.Outputs)
-        {
-            Reg($"_System.{o.Name}.client_count", TagDataType.Int32);
-            Reg($"_System.{o.Name}.requests_total", TagDataType.Int64);
-            Reg($"_System.{o.Name}.exceptions_total", TagDataType.Int64);
-        }
+    private void RegisterOutputSystemTags(OutputConfig o)
+    {
+        RegSystemTag(TagSpace, $"_System.{o.Name}.client_count", TagDataType.Int32);
+        RegSystemTag(TagSpace, $"_System.{o.Name}.requests_total", TagDataType.Int64);
+        RegSystemTag(TagSpace, $"_System.{o.Name}.exceptions_total", TagDataType.Int64);
     }
 
     private async Task RunSystemTagsLoopAsync(CancellationToken ct)
@@ -293,14 +354,14 @@ public sealed class GatewayEngine
                 TagSpace.Publish("_System.heartbeat", heartbeat++, TagQuality.Good, now);
                 TagSpace.Publish("_System.config_version", ConfigVersion, TagQuality.Good, now);
 
-                foreach (var (driver, device) in _drivers)
+                foreach (var entry in _driverEntries.Values)
                 {
-                    var h = driver.GetHealth(device);
-                    TagSpace.Publish($"_System.{device.Channel}.connected", h.Connected, TagQuality.Good, now);
-                    TagSpace.Publish($"_System.{device.Channel}.error_count", h.ErrorCount, TagQuality.Good, now);
-                    TagSpace.Publish($"_System.{device.Channel}.last_error_code", h.LastError ?? "", TagQuality.Good, now);
+                    var h = entry.Driver.GetHealth(entry.Device);
+                    TagSpace.Publish($"_System.{entry.Device.Channel}.connected", h.Connected, TagQuality.Good, now);
+                    TagSpace.Publish($"_System.{entry.Device.Channel}.error_count", h.ErrorCount, TagQuality.Good, now);
+                    TagSpace.Publish($"_System.{entry.Device.Channel}.last_error_code", h.LastError ?? "", TagQuality.Good, now);
                 }
-                foreach (var (output, iface) in _interfaces)
+                foreach (var (output, iface) in _interfaceEntries.Values)
                 {
                     var h = iface.GetHealth();
                     TagSpace.Publish($"_System.{output.Name}.client_count", h.ClientCount, TagQuality.Good, now);

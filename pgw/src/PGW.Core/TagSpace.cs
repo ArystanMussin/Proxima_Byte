@@ -54,6 +54,9 @@ public sealed class TagSpace : ITagSink, ITagSource
         _tags[def.Id] = entry;
     }
 
+    /// <summary>Drops a tag entirely (§7.3 hot reload: a source that's gone or changed shouldn't leave stale entries behind).</summary>
+    public void Unregister(string tagId) => _tags.TryRemove(tagId, out _);
+
     public IEnumerable<TagDefinition> Definitions => _tags.Values.Select(e => e.Def);
 
     public void Publish(string tagId, object? value, TagQuality quality, DateTime sourceTimestampUtc, QualitySubCode subCode = QualitySubCode.None, DateTime? serverTimestampUtc = null)
