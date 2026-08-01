@@ -4,6 +4,7 @@ using PGW.Drivers.Iec104;
 using PGW.Drivers.Mercury;
 using PGW.Drivers.Modbus;
 using PGW.Drivers.OpcUa;
+using Serilog;
 
 namespace PGW.Host;
 
@@ -24,12 +25,29 @@ public sealed class GatewayEngine
     private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, ModbusRtuSourceFactory.TypeId, OpcUaSourceFactory.TypeId, MercurySourceFactory.TypeId, Iec104SourceFactory.TypeId, DlmsSourceFactory.TypeId };
     private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
 
-    private sealed record DriverEntry(SourceConfig Config, IProtocolDriver Driver, DeviceHandle Device, List<string> TagIds);
+    // internal (not private): PGW.Core.Tests exercises SuperviseDriverPollingAsync directly with a
+    // crashing fake driver (§13 acceptance test 13) — see InternalsVisibleTo in PGW.Host.csproj.
+    internal sealed record DriverEntry(SourceConfig Config, IProtocolDriver Driver, DeviceHandle Device, List<string> TagIds);
+
+    // §9.0 watchdog: min/max restart backoff, and the "more than N crashes within T seconds" limiter
+    // that trips a device/output into Faulted rather than busy-looping restarts forever on a genuine bug.
+    private const int WatchdogRestartMinMs = 2000;
+    private const int WatchdogRestartMaxMs = 30000;
+    private const int WatchdogMaxFailuresInWindow = 5;
+    private static readonly TimeSpan WatchdogWindow = TimeSpan.FromSeconds(60);
+
+    private sealed class WatchdogState
+    {
+        public int BackoffMs = WatchdogRestartMinMs;
+        public readonly Queue<DateTime> RecentFailures = new();
+    }
 
     private readonly IPathProvider _paths;
     private readonly string _configPath;
     private readonly Dictionary<string, DriverEntry> _driverEntries = new();
     private readonly Dictionary<string, (OutputConfig Config, IProtocolInterface Interface)> _interfaceEntries = new();
+    private readonly Dictionary<string, WatchdogState> _driverWatchdogs = new();
+    private readonly Dictionary<string, WatchdogState> _interfaceWatchdogs = new();
     private readonly object _configLock = new();
     private CancellationTokenSource _runCts = new();
     private CancellationToken _hostCt;
@@ -77,10 +95,16 @@ public sealed class GatewayEngine
     public async Task StopAsync()
     {
         await _runCts.CancelAsync();
-        foreach (var (_, iface) in _interfaceEntries.Values) await iface.StopAsync(default);
+        foreach (var (cfg, iface) in _interfaceEntries.Values)
+        {
+            try { await iface.StopAsync(default); }
+            catch (Exception ex) { EventLog.Add(cfg.Name, $"stop failed (ignored): {ex.Message}", "ERROR"); }
+        }
         foreach (var entry in _driverEntries.Values) await entry.Driver.DisconnectAsync(entry.Device, default);
         _interfaceEntries.Clear();
         _driverEntries.Clear();
+        _interfaceWatchdogs.Clear();
+        _driverWatchdogs.Clear();
 
         if (Config.Gateway.PersistLastValues)
             TagPersistence.Save(TagSpace, LastValuesPath);
@@ -120,6 +144,7 @@ public sealed class GatewayEngine
             await entry.Driver.DisconnectAsync(entry.Device, CancellationToken.None);
             foreach (var tagId in entry.TagIds) TagSpace.Unregister(tagId);
             _driverEntries.Remove(name);
+            _driverWatchdogs.Remove(name);
             EventLog.Add(entry.Device.ToString(), "reload: stopped (source removed or changed)", "INFO");
         }
 
@@ -159,12 +184,7 @@ public sealed class GatewayEngine
         {
             var result = await entry.Driver.ConnectAsync(entry.Device, ct);
             EventLog.Add(entry.Device.ToString(), result.Ok ? "connected" : $"connect failed: {result.Error}", result.Ok ? "INFO" : "ERROR");
-            var device = entry.Device;
-            _ = entry.Driver.StartPollingAsync(device, TagSpace, ct).ContinueWith(t =>
-            {
-                if (t.IsFaulted && !ct.IsCancellationRequested)
-                    EventLog.Add(device.ToString(), $"polling stopped: {t.Exception?.GetBaseException().Message}", "ERROR");
-            }, TaskScheduler.Default);
+            _ = SuperviseDriverPollingAsync(entry, ct);
         }
 
         // Same two-phase pattern for outputs: stop/rebuild only what changed, leaving unaffected Modbus
@@ -174,8 +194,10 @@ public sealed class GatewayEngine
             if (newOutputs.TryGetValue(name, out var stillWanted) && ConfigDiff.ContentEquals(entry.Config, stillWanted))
                 continue;
 
-            await entry.Interface.StopAsync(CancellationToken.None);
+            try { await entry.Interface.StopAsync(CancellationToken.None); }
+            catch (Exception ex) { EventLog.Add(name, $"stop failed (ignored): {ex.Message}", "ERROR"); }
             _interfaceEntries.Remove(name);
+            _interfaceWatchdogs.Remove(name);
             EventLog.Add(name, "reload: stopped (output removed or changed)", "INFO");
         }
 
@@ -183,19 +205,162 @@ public sealed class GatewayEngine
         {
             if (_interfaceEntries.ContainsKey(o.Name)) continue;
 
-            switch (o.Interface)
+            var (iface, buildErrors) = BuildInterface(o);
+            foreach (var e in buildErrors) EventLog.Add(o.Name, e, "ERROR");
+            _interfaceEntries[o.Name] = (o, iface);
+            RegisterOutputSystemTags(o);
+            await StartInterfaceWithWatchdogAsync(o, iface, ct);
+        }
+    }
+
+    private (IProtocolInterface Iface, List<string> Errors) BuildInterface(OutputConfig o) => o.Interface switch
+    {
+        ModbusOutputFactory.TypeId => BuildModbusInterface(o),
+        _ => throw new NotSupportedException($"unknown interface '{o.Interface}'"),
+    };
+
+    private (IProtocolInterface, List<string>) BuildModbusInterface(OutputConfig o)
+    {
+        var (iface, _, errors) = ModbusOutputFactory.Build(o, CoreWriteAsync, EventLog);
+        return (iface, errors);
+    }
+
+    /// <summary>
+    /// §9.0 watchdog, output side: a bind/start failure (e.g. port already in use) is caught here
+    /// instead of propagating out of ReconcileAsync — one broken output must not take down every other
+    /// source and output being (re)started in the same reconcile pass (§9 "полная изоляция сбоев").
+    /// The failed output is marked Faulted immediately and a background task keeps retrying with backoff.
+    /// </summary>
+    private async Task StartInterfaceWithWatchdogAsync(OutputConfig o, IProtocolInterface iface, CancellationToken ct)
+    {
+        try
+        {
+            await iface.StartAsync(TagSpace, ct);
+            TagSpace.Publish($"_System.{o.Name}.status", "Running", TagQuality.Good, DateTime.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "PGW watchdog: output {Output} failed to start", o.Name);
+            EventLog.Add(o.Name, $"failed to start: {ex.GetBaseException().Message} — will retry in background", "ERROR");
+            TagSpace.Publish($"_System.{o.Name}.status", "Faulted", TagQuality.Good, DateTime.UtcNow);
+            var state = _interfaceWatchdogs[o.Name] = new WatchdogState();
+            state.RecentFailures.Enqueue(DateTime.UtcNow);
+            _ = SuperviseInterfaceRestartAsync(o, ct);
+        }
+    }
+
+    private async Task SuperviseInterfaceRestartAsync(OutputConfig o, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (!_interfaceWatchdogs.TryGetValue(o.Name, out var state)) return; // reload already cleaned this up
+            try { await Task.Delay(state.BackoffMs, ct); }
+            catch (OperationCanceledException) { return; }
+            state.BackoffMs = Math.Min(state.BackoffMs * 2, WatchdogRestartMaxMs);
+
+            // Bail out if a reload superseded this output (removed it, or rebuilt it for changed config)
+            // while we were waiting — a fresh attempt for the new config is already in flight elsewhere.
+            if (!_interfaceEntries.TryGetValue(o.Name, out var current) || !ConfigDiff.ContentEquals(current.Config, o))
+                return;
+
+            IProtocolInterface freshIface;
+            List<string> buildErrors;
+            try { (freshIface, buildErrors) = BuildInterface(o); }
+            catch (Exception ex) { EventLog.Add(o.Name, $"rebuild failed: {ex.Message}", "ERROR"); continue; }
+            foreach (var e in buildErrors) EventLog.Add(o.Name, e, "ERROR");
+
+            try
             {
-                case ModbusOutputFactory.TypeId:
-                    var (iface, _, errors) = ModbusOutputFactory.Build(o, CoreWriteAsync, EventLog);
-                    foreach (var e in errors) EventLog.Add(o.Name, e, "ERROR");
-                    await iface.StartAsync(TagSpace, ct);
-                    _interfaceEntries[o.Name] = (o, iface);
-                    RegisterOutputSystemTags(o);
-                    break;
-                default:
-                    throw new NotSupportedException($"unknown interface '{o.Interface}'");
+                await freshIface.StartAsync(TagSpace, ct);
+                _interfaceEntries[o.Name] = (o, freshIface);
+                TagSpace.Publish($"_System.{o.Name}.status", "Running", TagQuality.Good, DateTime.UtcNow);
+                return;
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "PGW watchdog: output {Output} retry failed", o.Name);
+                EventLog.Add(o.Name, $"retry failed: {ex.GetBaseException().Message}", "ERROR");
+
+                var now = DateTime.UtcNow;
+                while (state.RecentFailures.Count > 0 && now - state.RecentFailures.Peek() > WatchdogWindow)
+                    state.RecentFailures.Dequeue();
+                state.RecentFailures.Enqueue(now);
+
+                if (state.RecentFailures.Count > WatchdogMaxFailuresInWindow)
+                {
+                    EventLog.Add(o.Name, $"failed {state.RecentFailures.Count} times within {WatchdogWindow.TotalSeconds:0}s — giving up until reload", "ERROR");
+                    return;
+                }
             }
         }
+    }
+
+    /// <summary>
+    /// §9.0 watchdog, driver side (the priority-1 gap): if a driver's polling task itself crashes with
+    /// an unhandled exception (a bug, not a protocol-level error already handled inside the driver),
+    /// it used to just log and stay dead until a manual reload/restart. Now it's restarted with
+    /// exponential backoff; if it crashes more than <see cref="WatchdogMaxFailuresInWindow"/> times
+    /// within <see cref="WatchdogWindow"/>, the device is marked Faulted (a distinct state from Bad
+    /// quality — this is the gateway's own fault, not the source's) and the watchdog gives up until
+    /// the next reload.
+    /// </summary>
+    // restartMinMs/restartMaxMs/maxFailuresInWindow/window default to the production constants; tests
+    // override them to exercise the backoff/Faulted logic in milliseconds instead of real minutes.
+    internal async Task SuperviseDriverPollingAsync(DriverEntry entry, CancellationToken ct,
+        int restartMinMs = WatchdogRestartMinMs, int restartMaxMs = WatchdogRestartMaxMs,
+        int maxFailuresInWindow = WatchdogMaxFailuresInWindow, TimeSpan? window = null)
+    {
+        var effectiveWindow = window ?? WatchdogWindow;
+        var device = entry.Device;
+        var state = _driverWatchdogs[entry.Config.Name] = new WatchdogState { BackoffMs = restartMinMs };
+        TagSpace.Publish($"_System.{device.Channel}.status", "Running", TagQuality.Good, DateTime.UtcNow);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await entry.Driver.StartPollingAsync(device, TagSpace, ct);
+                if (ct.IsCancellationRequested) return; // normal shutdown
+                // A polling loop returning without being cancelled violates the "always poll until
+                // cancelled" contract — treat it the same as a crash rather than silently going idle.
+                throw new InvalidOperationException("StartPollingAsync returned without being cancelled");
+            }
+            catch (OperationCanceledException)
+            {
+                return; // normal shutdown/reload — not a watchdog event
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "PGW watchdog: polling task for {Device} crashed, restarting", device);
+                EventLog.Add(device.ToString(), $"polling task crashed: {ex.GetBaseException().Message} — restarting", "ERROR");
+                MarkDeviceBad(entry);
+
+                var now = DateTime.UtcNow;
+                while (state.RecentFailures.Count > 0 && now - state.RecentFailures.Peek() > effectiveWindow)
+                    state.RecentFailures.Dequeue();
+                if (state.RecentFailures.Count == 0) state.BackoffMs = restartMinMs; // fresh failure after a healthy stretch
+                state.RecentFailures.Enqueue(now);
+
+                if (state.RecentFailures.Count > maxFailuresInWindow)
+                {
+                    TagSpace.Publish($"_System.{device.Channel}.status", "Faulted", TagQuality.Good, DateTime.UtcNow);
+                    EventLog.Add(device.ToString(), $"polling task crashed {state.RecentFailures.Count} times within {effectiveWindow.TotalSeconds:0}s — device marked Faulted, watchdog giving up until reload", "ERROR");
+                    return;
+                }
+
+                try { await Task.Delay(state.BackoffMs, ct); }
+                catch (OperationCanceledException) { return; }
+                state.BackoffMs = Math.Min(state.BackoffMs * 2, restartMaxMs);
+            }
+        }
+    }
+
+    private void MarkDeviceBad(DriverEntry entry)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var tagId in entry.TagIds)
+            TagSpace.Publish(tagId, null, TagQuality.Bad, now, QualitySubCode.CommFailure);
     }
 
     // ---- Config editing (§14.2 write side) ----------------------------------------------------
@@ -334,11 +499,14 @@ public sealed class GatewayEngine
 
     /// <summary>Called once per source, both at cold start and whenever reload adds/recreates one (§7.3)
     /// — without this, a source added via a later reload would never get its health tags registered.</summary>
-    private void RegisterSourceSystemTags(SourceConfig s)
+    internal void RegisterSourceSystemTags(SourceConfig s)
     {
         RegSystemTag(TagSpace, $"_System.{s.Name}.connected", TagDataType.Bool);
         RegSystemTag(TagSpace, $"_System.{s.Name}.error_count", TagDataType.Int64);
         RegSystemTag(TagSpace, $"_System.{s.Name}.last_error_code", TagDataType.String);
+        // §9.0: "Running" vs "Faulted" — the gateway's own watchdog state, distinct from tag quality
+        // (Faulted means the polling task itself crashed repeatedly, a bug, not a comm failure).
+        RegSystemTag(TagSpace, $"_System.{s.Name}.status", TagDataType.String);
     }
 
     private void RegisterOutputSystemTags(OutputConfig o)
@@ -346,6 +514,7 @@ public sealed class GatewayEngine
         RegSystemTag(TagSpace, $"_System.{o.Name}.client_count", TagDataType.Int32);
         RegSystemTag(TagSpace, $"_System.{o.Name}.requests_total", TagDataType.Int64);
         RegSystemTag(TagSpace, $"_System.{o.Name}.exceptions_total", TagDataType.Int64);
+        RegSystemTag(TagSpace, $"_System.{o.Name}.status", TagDataType.String);
     }
 
     private async Task RunSystemTagsLoopAsync(CancellationToken ct)

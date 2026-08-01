@@ -137,6 +137,7 @@ input[type=search] {
 .log-row.ERROR { color: var(--bad); }
 
 .empty { padding: 16px 14px; color: var(--text-dim); text-align: center; font-size: 13px; }
+.hint { color: var(--text-dim); font-size: 12px; margin: 4px 0 12px; }
 
 /* ---- Config editor ---- */
 .span-2 { grid-column: 1 / -1; }

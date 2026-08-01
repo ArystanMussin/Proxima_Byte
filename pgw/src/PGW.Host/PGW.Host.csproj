@@ -17,6 +17,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lets tests exercise GatewayEngine's internal watchdog supervising loop (§9.0) directly, with
+         injectable timing, instead of waiting out real backoff delays or adding a test-only driver
+         type to the production driver-factory switch. -->
+    <InternalsVisibleTo Include="PGW.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />

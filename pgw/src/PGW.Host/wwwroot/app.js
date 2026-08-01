@@ -797,6 +797,84 @@ $("#sc-disconnect").addEventListener("click", async () => {
   $("#sc-body").innerHTML = `<tr><td colspan="5" class="empty">нет данных — заполни адрес устройства и нажми «Опрос»</td></tr>`;
 });
 
+// ---- Modbus network scan (§4.5): "scan", not "discover" — Modbus has no protocol-level discovery,
+// see the hint text in index.html. Async job on the server (scan_id), polled here every 500ms. ----
+
+let networkScanId = null;
+let networkScanTimer = null;
+
+function renderScanResults(job) {
+  const rows = job.results ?? [];
+  if (rows.length === 0) {
+    $("#ns-body").innerHTML = `<tr><td colspan="4" class="empty">пока ничего не найдено…</td></tr>`;
+    return;
+  }
+  $("#ns-body").innerHTML = rows.map((r) => `
+    <tr>
+      <td>${esc(r.ip)}</td>
+      <td>${esc(String(r.port))}</td>
+      <td>${r.responded ? "да" : "—"}</td>
+      <td>${esc((r.unit_ids_found ?? []).join(", "))}</td>
+    </tr>`).join("");
+}
+
+function stopNetworkScanPolling() {
+  if (networkScanTimer) { clearInterval(networkScanTimer); networkScanTimer = null; }
+}
+
+async function pollNetworkScan() {
+  if (!networkScanId) return;
+  let job;
+  try { job = await getJson(`/tools/modbus/scan/${networkScanId}`); }
+  catch (err) { $("#ns-status").textContent = `ошибка: ${err.message}`; stopNetworkScanPolling(); return; }
+
+  renderScanResults(job);
+  $("#ns-status").textContent = `${job.state === "Running" ? "сканирование…" : job.state === "Cancelled" ? "отменено" : "готово"} ${job.scanned}/${job.total}`;
+
+  if (job.state !== "Running") {
+    stopNetworkScanPolling();
+    $("#ns-start").hidden = false;
+    $("#ns-cancel").hidden = true;
+    $("#ns-csv").hidden = job.results.length === 0;
+  }
+}
+
+$("#ns-start").addEventListener("click", async () => {
+  const range = $("#ns-range").value.trim();
+  if (!range) { $("#ns-status").textContent = "укажи диапазон (CIDR или a-b)"; return; }
+  $("#ns-status").textContent = "";
+  $("#ns-body").innerHTML = `<tr><td colspan="4" class="empty">запуск…</td></tr>`;
+  try {
+    const res = await postJson("/tools/modbus/scan", {
+      range,
+      port: Number($("#ns-port").value) || 502,
+      timeout_ms: Number($("#ns-timeout").value) || 200,
+      max_concurrency: Number($("#ns-concurrency").value) || 32,
+    });
+    if (!res.ok) throw new Error(res.error);
+    networkScanId = res.scan_id;
+    $("#ns-start").hidden = true;
+    $("#ns-cancel").hidden = false;
+    $("#ns-csv").hidden = true;
+    stopNetworkScanPolling();
+    networkScanTimer = setInterval(pollNetworkScan, 500);
+    await pollNetworkScan();
+  } catch (err) {
+    $("#ns-status").textContent = `ошибка: ${err.message}`;
+    $("#ns-body").innerHTML = `<tr><td colspan="4" class="empty">нет данных — укажи диапазон и нажми «Сканировать»</td></tr>`;
+  }
+});
+
+$("#ns-cancel").addEventListener("click", async () => {
+  if (!networkScanId) return;
+  await postJson(`/tools/modbus/scan/${networkScanId}/cancel`, {}).catch(() => {});
+});
+
+$("#ns-csv").addEventListener("click", () => {
+  if (!networkScanId) return;
+  window.open(`/tools/modbus/scan/${networkScanId}/csv`, "_blank");
+});
+
 // ============================================================================================
 // OPC UA address-space browse — expandable tree over the existing /config/opcua/browse endpoint
 // (browses one level at a time, lazily, same as any real OPC UA client: eagerly recursing the

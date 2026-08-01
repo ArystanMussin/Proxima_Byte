@@ -91,6 +91,54 @@ if (args.Length > 0 && args[0] is "validate" or "export-map")
     return 0;
 }
 
+// §7.1/§7.3: `pgw import-csv <source> <file.csv>` / `pgw export-csv <source> <file.csv>` — bulk
+// tag list editing (typical case per the spec: "3000 tags from a spreadsheet"), operating directly on
+// the config file rather than requiring the service to be running.
+if (args.Length > 0 && args[0] is "import-csv" or "export-csv")
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine($"usage: pgw {args[0]} <source-name> <file.csv>");
+        return 1;
+    }
+    var (sourceName, csvPath) = (args[1], args[2]);
+    var cliEngine = new GatewayEngine(paths, configPath);
+    var cliErrors = cliEngine.LoadAndValidate();
+    foreach (var e in cliErrors) Console.Error.WriteLine($"error: {e}");
+    if (cliErrors.Count > 0) return 1;
+
+    var src = cliEngine.Config.Sources.FirstOrDefault(s => s.Name == sourceName);
+    if (src is null)
+    {
+        Console.Error.WriteLine($"error: unknown source '{sourceName}' (add it first — import-csv only adds/updates its tags)");
+        return 1;
+    }
+
+    if (args[0] == "export-csv")
+    {
+        File.WriteAllText(csvPath, TagCsv.ExportCsv(src.Tags));
+        Console.WriteLine($"wrote {csvPath} ({src.Tags.Count} tags)");
+        return 0;
+    }
+
+    if (!File.Exists(csvPath))
+    {
+        Console.Error.WriteLine($"error: file not found: {csvPath}");
+        return 1;
+    }
+    var rows = TagCsv.ParseCsv(File.ReadAllText(csvPath));
+    var imported = 0;
+    foreach (var row in rows)
+    {
+        var (applied, rowErrors) = cliEngine.UpsertTag(sourceName, row);
+        if (!applied) { Console.Error.WriteLine($"error on row '{row.GetStr("name", "?")}': {string.Join("; ", rowErrors)}"); continue; }
+        foreach (var w in rowErrors) Console.Error.WriteLine($"warning: {w}");
+        imported++;
+    }
+    Console.WriteLine($"imported {imported}/{rows.Count} tags into source '{sourceName}'");
+    return imported == rows.Count ? 0 : 1;
+}
+
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Enum.TryParse<Serilog.Events.LogEventLevel>(Environment.GetEnvironmentVariable("PGW_LOG_LEVEL") ?? "Information", true, out var lvl) ? lvl : Serilog.Events.LogEventLevel.Information)
     .WriteTo.Console()
@@ -173,6 +221,29 @@ app.MapPut("/config/channels/{name}/tags/{tagName}", (string name, string tagNam
 });
 app.MapDelete("/config/channels/{name}/tags/{tagName}", (string name, string tagName) => ApplyResult(gatewayEngine.RemoveTag(name, tagName)));
 
+// §7.1: bulk tag list editing via CSV — same underlying UpsertTag as the one-at-a-time endpoints
+// above, so a row is exactly as valid/invalid as a single POST would be, just without curl-in-a-loop.
+app.MapGet("/config/channels/{name}/tags/csv", (string name) =>
+{
+    var src = gatewayEngine.Config.Sources.FirstOrDefault(s => s.Name == name);
+    return src is null ? Results.NotFound(new { error = $"unknown source '{name}'" }) : Results.Text(TagCsv.ExportCsv(src.Tags), "text/csv");
+});
+app.MapPost("/config/channels/{name}/tags/import-csv", async (string name, HttpRequest req) =>
+{
+    if (gatewayEngine.Config.Sources.All(s => s.Name != name)) return Results.NotFound(new { error = $"unknown source '{name}'" });
+    using var reader = new StreamReader(req.Body);
+    var rows = TagCsv.ParseCsv(await reader.ReadToEndAsync());
+    var errors = new List<string>();
+    var imported = 0;
+    foreach (var row in rows)
+    {
+        var (applied, rowErrors) = gatewayEngine.UpsertTag(name, row);
+        if (!applied) { errors.AddRange(rowErrors.Select(e => $"'{row.GetStr("name", "?")}': {e}")); continue; }
+        imported++;
+    }
+    return Results.Ok(new { ok = errors.Count == 0, imported, total = rows.Count, errors });
+});
+
 app.MapGet("/config/outputs", () => gatewayEngine.Config.Outputs);
 app.MapPost("/config/outputs", (Dictionary<string, object?> body) => ApplyResult(gatewayEngine.UpsertOutput(body)));
 app.MapPut("/config/outputs/{name}", (string name, Dictionary<string, object?> body) =>
@@ -232,6 +303,23 @@ app.MapPost("/config/opcua/browse", async (OpcUaBrowseRequest req) =>
     }
 });
 
+// ---- OPC UA server discovery (§5.5): direct GetEndpoints against a known/entered host — the
+// mandatory fallback method, no session/cert-trust decision needed since GetEndpoints is unsecured ----
+app.MapPost("/tools/opcua/discover", async (OpcUaDiscoverRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Host)) return Results.BadRequest(new { error = "'host' is required, e.g. opc.tcp://192.168.1.50:4840" });
+    var certsPath = Path.Combine(paths.DataDir, "certs", "_discover");
+    try
+    {
+        var endpoints = await OpcUaDiscovery.DiscoverAsync(req.Host, certsPath, req.Autoaccept ?? true, CancellationToken.None);
+        return Results.Ok(endpoints);
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 // ---- Built-in Modbus scanner (§ diagnostics): poll/write any device, independent of the config ----
 var scanner = new ModbusScanner();
 app.Lifetime.ApplicationStopping.Register(scanner.Dispose);
@@ -278,6 +366,45 @@ app.MapPost("/tools/modbus/close", (ModbusCloseRequest req) =>
     scanner.Close(req.Host, req.Port ?? 502);
     return Results.Ok(new { ok = true });
 });
+
+// ---- Modbus TCP network scan (§4.5) — named "scan", not "discover": Modbus has no protocol-level
+// discovery mechanism, this is methodical enumeration, and honesty about that belongs in the API name
+// too, not just the docs. Async job (scan_id) so a /24 doesn't block a request for however long it takes.
+var networkScanner = new ModbusNetworkScanner();
+app.Lifetime.ApplicationStopping.Register(networkScanner.Dispose);
+
+app.MapPost("/tools/modbus/scan", (ModbusNetworkScanRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Range)) return Results.BadRequest(new { ok = false, error = "'range' is required (CIDR, e.g. 192.168.1.0/24, or a dash range, e.g. 192.168.1.1-192.168.1.50)" });
+    try
+    {
+        var job = networkScanner.Start(req.Range, req.Port ?? 502, req.TimeoutMs ?? 200, req.MaxConcurrency ?? 32);
+        return Results.Ok(new { ok = true, scan_id = job.Id, total = job.Total });
+    }
+    catch (Exception ex) { return Results.BadRequest(new { ok = false, error = ex.Message }); }
+});
+
+app.MapGet("/tools/modbus/scan/{id}", (string id) =>
+{
+    var job = networkScanner.Get(id);
+    if (job is null) return Results.NotFound(new { error = $"unknown scan_id '{id}'" });
+    return Results.Ok(ScanJobToApi(job));
+});
+
+app.MapPost("/tools/modbus/scan/{id}/cancel", (string id) =>
+    networkScanner.Cancel(id) ? Results.Ok(new { ok = true }) : Results.NotFound(new { error = $"unknown scan_id '{id}'" }));
+
+app.MapGet("/tools/modbus/scan/{id}/csv", (string id) =>
+{
+    var job = networkScanner.Get(id);
+    if (job is null) return Results.NotFound(new { error = $"unknown scan_id '{id}'" });
+    var csv = new System.Text.StringBuilder("ip,port,responded,unit_ids_found\r\n");
+    foreach (var r in job.Results.OrderBy(r => r.Ip, StringComparer.Ordinal))
+        csv.Append($"{r.Ip},{r.Port},{r.Responded},\"{string.Join(';', r.UnitIdsFound)}\"\r\n");
+    return Results.Text(csv.ToString(), "text/csv");
+});
+
+app.MapGet("/tools/modbus/serial-ports", () => Results.Ok(System.IO.Ports.SerialPort.GetPortNames()));
 
 app.MapGet("/runtime/tags", (string? prefix) =>
 {
@@ -380,6 +507,17 @@ static object ToApiTag(TagSnapshot t) => new
     access = t.Definition.Access.ToString(),
 };
 
+static object ScanJobToApi(ModbusNetworkScanJob job) => new
+{
+    scan_id = job.Id,
+    state = job.State.ToString(),
+    total = job.Total,
+    scanned = job.Scanned,
+    started_at = job.StartedUtc,
+    results = job.Results.OrderBy(r => r.Ip, StringComparer.Ordinal)
+        .Select(r => new { ip = r.Ip, port = r.Port, responded = r.Responded, unit_ids_found = r.UnitIdsFound }),
+};
+
 /// <summary>One poll of the built-in Modbus scanner. Everything but `host` and `address` has a default.</summary>
 public sealed record ModbusScanRequest(
     string Host,
@@ -438,6 +576,12 @@ public sealed record ModbusWriteRequest(
 
 public sealed record ModbusCloseRequest(string Host, int? Port);
 
+public sealed record ModbusNetworkScanRequest(
+    string Range,
+    int? Port,
+    [property: JsonPropertyName("timeout_ms")] int? TimeoutMs,
+    [property: JsonPropertyName("max_concurrency")] int? MaxConcurrency);
+
 /// <summary>Either browse an already-configured `opcua_client` source, or connect ad-hoc via `endpoint`.</summary>
 public sealed record OpcUaBrowseRequest(
     string? Source,
@@ -445,3 +589,5 @@ public sealed record OpcUaBrowseRequest(
     [property: JsonPropertyName("node_id")] string? NodeId,
     [property: JsonPropertyName("use_security")] bool? UseSecurity,
     bool? Autoaccept);
+
+public sealed record OpcUaDiscoverRequest(string Host, bool? Autoaccept);

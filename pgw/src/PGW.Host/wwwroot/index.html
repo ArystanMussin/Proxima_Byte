@@ -93,6 +93,29 @@
         <tbody id="sc-body"><tr><td colspan="5" class="empty">нет данных — заполни адрес устройства и нажми «Опрос»</td></tr></tbody>
       </table>
     </div>
+
+    <div class="panel span-2">
+      <h2>Скан сети Modbus TCP</h2>
+      <p class="hint">У Modbus нет протокольного discovery — это методичный перебор адресов
+        (TCP-коннект + пробное чтение unit id 1-10), не настоящее обнаружение устройств. Не запускай
+        на чужой/production-сети без необходимости — это похоже на port-scan.</p>
+      <div class="scan-form">
+        <div class="field"><label>Диапазон (CIDR или a-b)</label><input id="ns-range" type="text" placeholder="192.168.1.0/24"></div>
+        <div class="field"><label>Port</label><input id="ns-port" type="number" value="502"></div>
+        <div class="field"><label>Таймаут, мс</label><input id="ns-timeout" type="number" value="200"></div>
+        <div class="field"><label>Параллельно</label><input id="ns-concurrency" type="number" value="32"></div>
+      </div>
+      <div class="scan-actions">
+        <button class="add-btn" id="ns-start">▶ Сканировать</button>
+        <button class="icon-btn" id="ns-cancel" hidden>■ Отмена</button>
+        <button class="icon-btn" id="ns-csv" hidden>Экспорт CSV</button>
+        <span class="scan-status" id="ns-status"></span>
+      </div>
+      <table>
+        <thead><tr><th>IP</th><th>Порт</th><th>Ответил</th><th>Unit Id найдены</th></tr></thead>
+        <tbody id="ns-body"><tr><td colspan="4" class="empty">нет данных — укажи диапазон и нажми «Сканировать»</td></tr></tbody>
+      </table>
+    </div>
   </main>
 
   <dialog id="browse-dialog">
