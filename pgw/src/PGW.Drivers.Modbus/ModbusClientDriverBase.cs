@@ -43,6 +43,10 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
     private readonly IReadOnlyList<string> _allTagIds;
     private readonly RingLog _log;
     private readonly SemaphoreSlim _io = new(1, 1);
+    // §4.1.1: non-null when this device shares its physical port with others. _io above already
+    // serializes this one device's own calls; this additionally serializes across every other device on
+    // the same bus for the full duration of each request/response transaction (§6.5 write priority).
+    private readonly SerialTransport? _sharedTransport;
 
     private long _errorCount;
     private string? _lastError;
@@ -54,7 +58,8 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
     public ModbusClientDriverBase(string driverTypeId, ModbusClient client,
         Func<ModbusClient, CancellationToken, Task> connect, Action<ModbusClient> disconnect,
         ModbusPollSettings cfg, IReadOnlyDictionary<int, List<ReadBlock>> blocksByScanRate,
-        IReadOnlyDictionary<string, TagWireInfo> wireByNativeAddress, IReadOnlyList<string> allTagIds, RingLog log)
+        IReadOnlyDictionary<string, TagWireInfo> wireByNativeAddress, IReadOnlyList<string> allTagIds, RingLog log,
+        SerialTransport? sharedTransport = null)
     {
         DriverTypeId = driverTypeId;
         _client = client;
@@ -65,6 +70,7 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
         _wireByNativeAddress = wireByNativeAddress;
         _allTagIds = allTagIds;
         _log = log;
+        _sharedTransport = sharedTransport;
         _reconnectDelayMs = cfg.ReconnectMinMs;
     }
 
@@ -129,8 +135,10 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
         var now = DateTime.UtcNow;
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await _io.WaitAsync(ct);
+        IDisposable? busLock = null;
         try
         {
+            if (_sharedTransport is not null) busLock = await _sharedTransport.AcquireAsync(SerialBusPriority.Read, ct);
             if (block.Area is ModbusArea.HoldingRegister or ModbusArea.InputRegister)
             {
                 var regs = block.Area == ModbusArea.HoldingRegister
@@ -179,6 +187,7 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
         }
         finally
         {
+            busLock?.Dispose();
             _io.Release();
         }
     }
@@ -191,8 +200,10 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
             return WriteResult.Failure("unknown_address");
 
         await _io.WaitAsync(ct);
+        IDisposable? busLock = null;
         try
         {
+            if (_sharedTransport is not null) busLock = await _sharedTransport.AcquireAsync(SerialBusPriority.Write, ct);
             switch (addr.Area)
             {
                 case ModbusArea.Coil:
@@ -222,6 +233,7 @@ public sealed class ModbusClientDriverBase : IProtocolDriver
         }
         finally
         {
+            busLock?.Dispose();
             _io.Release();
         }
     }

@@ -9,7 +9,7 @@ public static class MercurySourceFactory
 {
     public const string TypeId = "mercury_client";
 
-    public static (IProtocolDriver Driver, DeviceHandle Device, List<(TagDefinition Def, TagAddress Addr)> Tags) Build(SourceConfig src, RingLog log)
+    public static (IProtocolDriver Driver, DeviceHandle Device, List<(TagDefinition Def, TagAddress Addr)> Tags) Build(SourceConfig src, RingLog log, SerialTransportRegistry? transports = null)
     {
         var s = src.Settings;
         var portName = s.GetStr("serial_port");
@@ -29,11 +29,14 @@ public static class MercurySourceFactory
             ReconnectMinMs: s.GetInt("reconnect_min_ms", 2000),
             ReconnectMaxMs: s.GetInt("reconnect_max_ms", 30000));
 
-        var transport = new SerialMercuryTransport(
-            portName,
-            s.GetInt("baud_rate", 9600),
-            ParseParity(s.GetStr("parity", "none")),
-            ParseStopBits(s.GetStr("stop_bits", "one")));
+        var shared = ResolveSharedTransport(src, transports);
+        IMercuryTransport transport = shared is not null
+            ? new SharedSerialMercuryTransport(shared)
+            : new SerialMercuryTransport(
+                portName,
+                s.GetInt("baud_rate", 9600),
+                ParseParity(s.GetStr("parity", "none")),
+                ParseStopBits(s.GetStr("stop_bits", "one")));
 
         var device = new DeviceHandle(src.Name, src.Name);
         var defs = new List<(TagDefinition, TagAddress)>();
@@ -63,6 +66,26 @@ public static class MercurySourceFactory
 
         var driver = new MercuryClientDriver(transport, cfg, bindings, log);
         return (driver, device, defs);
+    }
+
+    /// <summary>§4.1.1: resolves this source's shared bus (if <c>serial_transport</c> is set) via
+    /// <paramref name="transports"/>, or returns null for a dedicated per-source port. Split out from
+    /// <see cref="Build"/> so config validation can probe for baud/parity/stop_bits mismatches against a
+    /// throwaway registry before anything actually opens a port or builds a driver.</summary>
+    public static SerialTransport? ResolveSharedTransport(SourceConfig src, SerialTransportRegistry? transports)
+    {
+        var s = src.Settings;
+        var name = s.GetStr("serial_transport");
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        if (transports is null)
+            throw new InvalidOperationException($"source '{src.Name}': serial_transport is set but no registry was provided");
+
+        return transports.GetOrCreate(
+            name,
+            s.GetStr("serial_port"),
+            s.GetInt("baud_rate", 9600),
+            ParseParity(s.GetStr("parity", "none")),
+            ParseStopBits(s.GetStr("stop_bits", "one")));
     }
 
     private static byte[] ParsePassword(string sourceName, string password)

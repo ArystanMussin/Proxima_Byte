@@ -20,6 +20,9 @@ internal sealed class LoopbackMercuryTransport(Socket socket) : IMercuryTranspor
         catch (OperationCanceledException) { return 0; }
         catch (SocketException) { return 0; }
     }
+    // Nothing else shares this dedicated loopback socket in these tests.
+    public Task<IDisposable> AcquireAsync(CancellationToken ct) => Task.FromResult<IDisposable>(NoopLock.Instance);
+    private sealed class NoopLock : IDisposable { public static readonly NoopLock Instance = new(); public void Dispose() { } }
 }
 
 /// <summary>

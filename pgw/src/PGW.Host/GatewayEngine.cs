@@ -48,6 +48,10 @@ public sealed class GatewayEngine
     private readonly Dictionary<string, (OutputConfig Config, IProtocolInterface Interface)> _interfaceEntries = new();
     private readonly Dictionary<string, WatchdogState> _driverWatchdogs = new();
     private readonly Dictionary<string, WatchdogState> _interfaceWatchdogs = new();
+    // §4.1.1: shared serial ports live for the gateway's lifetime, independent of any single source's
+    // own reconnect/reload cycle — several sources (Modbus RTU and/or Mercury) resolve to the same
+    // SerialTransport instance here via their `serial_transport` config key.
+    private readonly SerialTransportRegistry _serialTransports = new();
     private readonly object _configLock = new();
     private CancellationTokenSource _runCts = new();
     private CancellationToken _hostCt;
@@ -73,6 +77,31 @@ public sealed class GatewayEngine
         {
             var wo = ModbusSourceFactory.ParseWordOrder(o.Settings.GetStr("word_order"), WordOrder.ABCD);
             errors.AddRange(RegisterMapBuilder.Build(o, wo).Errors);
+        }
+        errors.AddRange(ValidateSerialTransports(cfg));
+        return errors;
+    }
+
+    /// <summary>§4.1.1/§13 test 15: sources sharing a `serial_transport` name must agree on
+    /// port/baud/parity/stop_bits — probed here against a throwaway registry (never actually opens a
+    /// port) so a mismatch surfaces as a normal validation error instead of an exception thrown mid-reconcile.</summary>
+    private static List<string> ValidateSerialTransports(GatewayProjectConfig cfg)
+    {
+        var errors = new List<string>();
+        using var probe = new SerialTransportRegistry();
+        foreach (var s in cfg.Sources)
+        {
+            if (string.IsNullOrWhiteSpace(s.Settings.GetStr("serial_transport"))) continue;
+            try
+            {
+                _ = s.Driver switch
+                {
+                    ModbusRtuSourceFactory.TypeId => ModbusRtuSourceFactory.ResolveSharedTransport(s, probe),
+                    MercurySourceFactory.TypeId => MercurySourceFactory.ResolveSharedTransport(s, probe),
+                    _ => null,
+                };
+            }
+            catch (Exception ex) { errors.Add($"source '{s.Name}': {ex.Message}"); }
         }
         return errors;
     }
@@ -105,6 +134,7 @@ public sealed class GatewayEngine
         _driverEntries.Clear();
         _interfaceWatchdogs.Clear();
         _driverWatchdogs.Clear();
+        _serialTransports.Dispose();
 
         if (Config.Gateway.PersistLastValues)
             TagPersistence.Save(TagSpace, LastValuesPath);
@@ -158,8 +188,8 @@ public sealed class GatewayEngine
             var (driver, device, tags) = src.Driver switch
             {
                 ModbusSourceFactory.TypeId => ModbusSourceFactory.Build(src, EventLog),
-                ModbusRtuSourceFactory.TypeId => ModbusRtuSourceFactory.Build(src, EventLog),
-                MercurySourceFactory.TypeId => MercurySourceFactory.Build(src, EventLog),
+                ModbusRtuSourceFactory.TypeId => ModbusRtuSourceFactory.Build(src, EventLog, _serialTransports),
+                MercurySourceFactory.TypeId => MercurySourceFactory.Build(src, EventLog, _serialTransports),
                 Iec104SourceFactory.TypeId => Iec104SourceFactory.Build(src, EventLog),
                 DlmsSourceFactory.TypeId => DlmsSourceFactory.Build(src, EventLog),
                 OpcUaSourceFactory.TypeId => OpcUaSourceFactory.Build(src, EventLog, _paths),

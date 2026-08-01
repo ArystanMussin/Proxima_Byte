@@ -64,28 +64,45 @@ public static class ModbusClientDriverFactory
             blocksByScanRate, wireByNativeAddress, allTagIds, log);
     }
 
+    /// <summary><paramref name="sharedTransport"/> non-null means §4.1.1 applies: this device shares its
+    /// physical port with others via a <c>serial_transport</c> name, so the client is wired to that
+    /// already-owned port with <c>Initialize(...)</c> instead of opening (and later closing) its own
+    /// dedicated <see cref="System.IO.Ports.SerialPort"/> via <c>Connect(portName)</c>.</summary>
     public static IProtocolDriver CreateRtu(ModbusRtuDeviceSettings cfg, IReadOnlyDictionary<int, List<ReadBlock>> blocksByScanRate,
-        IReadOnlyDictionary<string, TagWireInfo> wireByNativeAddress, IReadOnlyList<string> allTagIds, RingLog log)
+        IReadOnlyDictionary<string, TagWireInfo> wireByNativeAddress, IReadOnlyList<string> allTagIds, RingLog log,
+        SerialTransport? sharedTransport = null)
     {
         var client = new ModbusRtuClient();
 
         Task Connect(ModbusClient c, CancellationToken ct)
         {
             var rtu = (ModbusRtuClient)c;
-            rtu.BaudRate = cfg.BaudRate;
-            rtu.Parity = cfg.Parity;
-            rtu.StopBits = cfg.StopBits;
-            rtu.Handshake = cfg.Handshake;
             rtu.ReadTimeout = cfg.TimeoutMs;
             rtu.WriteTimeout = cfg.TimeoutMs;
-            rtu.Connect(cfg.PortName);
+            if (sharedTransport is not null)
+            {
+                sharedTransport.EnsureOpen();
+                // Connect(string) defaults to LittleEndian — match that explicitly since Initialize
+                // doesn't apply a default of its own.
+                rtu.Initialize(new SharedRtuSerialPort(sharedTransport), ModbusEndianness.LittleEndian);
+            }
+            else
+            {
+                rtu.BaudRate = cfg.BaudRate;
+                rtu.Parity = cfg.Parity;
+                rtu.StopBits = cfg.StopBits;
+                rtu.Handshake = cfg.Handshake;
+                rtu.Connect(cfg.PortName);
+            }
             return Task.CompletedTask;
         }
-        void Disconnect(ModbusClient c) => ((ModbusRtuClient)c).Close();
+        // A shared port outlives any single device's connect/disconnect cycle — closing it here would
+        // sever every other device on the same bus.
+        void Disconnect(ModbusClient c) { if (sharedTransport is null) ((ModbusRtuClient)c).Close(); }
 
         var poll = ToPollSettings(cfg);
         return new ModbusClientDriverBase(ModbusRtuSourceFactory.TypeId, client, Connect, Disconnect, poll,
-            blocksByScanRate, wireByNativeAddress, allTagIds, log);
+            blocksByScanRate, wireByNativeAddress, allTagIds, log, sharedTransport);
     }
 
     private static ModbusPollSettings ToPollSettings(ModbusDeviceSettings cfg) => new(

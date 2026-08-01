@@ -8,6 +8,15 @@
 
   <ItemGroup>
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
+    <!-- §4.1.1 SerialTransport: shared physical serial port abstraction lives in Core so both
+         PGW.Drivers.Modbus and PGW.Drivers.Mercury (neither of which reference each other) can share it. -->
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- §13 test 15 virtualizes SerialTransport's physical line with a loopback socket instead of a real
+         SerialPort — there's no RS-485 hardware in CI/this sandbox — via an internal test-only seam. -->
+    <InternalsVisibleTo Include="PGW.Core.Tests" />
   </ItemGroup>
 
 </Project>

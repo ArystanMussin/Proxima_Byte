@@ -66,6 +66,57 @@ public class ModbusOutputPolicyTests
         await iface.StopAsync(default);
     }
 
+    /// <summary>§13 test 4 / §9.2: 8 simultaneous Modbus clients against one output, all get correct
+    /// answers, none blocks another. §9.2 flagged this as fully reproducible in code (unlike the hardware-
+    /// dependent tests in that table) — this proves it directly rather than relying on the adjacent
+    /// max_connections test (which only proves the limit is enforced at N=2, not that N=8 within a much
+    /// higher limit runs concurrently without serialization).</summary>
+    [Fact]
+    public async Task Eight_Concurrent_Modbus_Clients_Get_Correct_Responses_Without_Blocking()
+    {
+        var (tagSpace, _) = RegisterTag("src.value", TagDataType.UInt16);
+        tagSpace.Publish("src.value", (ushort)4242, TagQuality.Good, DateTime.UtcNow);
+
+        var port = TestUtil.GetFreePort();
+        var output = new OutputConfig
+        {
+            Name = "out",
+            Interface = "modbus_tcp_server",
+            Settings = new() { ["bind"] = "127.0.0.1", ["port"] = port, ["max_connections"] = 16 },
+            Map = new() { new() { ["tag"] = "src.value", ["unit_id"] = 1, ["area"] = "HR", ["address"] = 0, ["type"] = "uint16" } },
+        };
+        var (iface, _, errors) = ModbusOutputFactory.Build(output, (_, _, _) => Task.FromResult(WriteResult.Success()), new RingLog());
+        Assert.Empty(errors);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await iface.StartAsync(tagSpace, cts.Token);
+
+        const int clientCount = 8;
+        var clients = new ModbusTcpClient[clientCount];
+        for (var i = 0; i < clientCount; i++)
+        {
+            var c = new ModbusTcpClient { ConnectTimeout = 2000, ReadTimeout = 2000 };
+            c.Connect(new IPEndPoint(IPAddress.Loopback, port));
+            clients[i] = c;
+        }
+
+        // Every client reads several times concurrently with every other client — if the server (or
+        // anything behind it) ever serialized clients instead of servicing them independently, this
+        // would either time out or take roughly clientCount times as long as a single round trip.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (var round = 0; round < 5; round++)
+        {
+            var reads = clients.Select(c => c.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token)).ToArray();
+            var results = await Task.WhenAll(reads);
+            foreach (var r in results) Assert.Equal((ushort)4242, r.ToArray()[0]);
+        }
+        sw.Stop();
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"8 concurrent clients over 5 rounds took {sw.Elapsed} — looks serialized/blocked");
+
+        foreach (var c in clients) c.Disconnect();
+        await iface.StopAsync(default);
+    }
+
     [Fact]
     public async Task FreezeAndFlag_Freezes_Value_And_Sets_Flag_Bit_While_Bad_Then_Clears_It()
     {

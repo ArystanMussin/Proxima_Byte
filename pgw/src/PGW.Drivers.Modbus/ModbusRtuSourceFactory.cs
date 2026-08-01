@@ -11,7 +11,7 @@ public static class ModbusRtuSourceFactory
 {
     public const string TypeId = "modbus_rtu_client";
 
-    public static (IProtocolDriver Driver, DeviceHandle Device, List<(TagDefinition Def, TagAddress Addr)> Tags) Build(SourceConfig src, RingLog log)
+    public static (IProtocolDriver Driver, DeviceHandle Device, List<(TagDefinition Def, TagAddress Addr)> Tags) Build(SourceConfig src, RingLog log, SerialTransportRegistry? transports = null)
     {
         var s = src.Settings;
         var oneBased = s.GetBool("one_based");
@@ -45,8 +45,30 @@ public static class ModbusRtuSourceFactory
         var device = new DeviceHandle(src.Name, src.Name);
         var parsed = ModbusSourceFactory.ParseTags(src, device, oneBased, defaultOrder, s.GetInt("scan_rate_ms", 1000), cfg.GapTolerance);
 
-        var driver = ModbusClientDriverFactory.CreateRtu(cfg, parsed.BlocksByScanRate, parsed.WireByAddr, parsed.AllTagIds, log);
+        var shared = ResolveSharedTransport(src, transports);
+        var driver = ModbusClientDriverFactory.CreateRtu(cfg, parsed.BlocksByScanRate, parsed.WireByAddr, parsed.AllTagIds, log, shared);
         return (driver, device, parsed.Defs);
+    }
+
+    /// <summary>§4.1.1: resolves this source's shared bus (if <c>serial_transport</c> is set) via
+    /// <paramref name="transports"/>, or returns null for a dedicated per-source port. Split out from
+    /// <see cref="Build"/> so config validation can probe for baud/parity/stop_bits mismatches against a
+    /// throwaway registry (see GatewayEngine's ValidateSerialTransports) before anything actually opens a
+    /// port or builds a driver.</summary>
+    public static SerialTransport? ResolveSharedTransport(SourceConfig src, SerialTransportRegistry? transports)
+    {
+        var s = src.Settings;
+        var name = s.GetStr("serial_transport");
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        if (transports is null)
+            throw new InvalidOperationException($"source '{src.Name}': serial_transport is set but no registry was provided");
+
+        return transports.GetOrCreate(
+            name,
+            s.GetStr("serial_port"),
+            s.GetInt("baud_rate", 9600),
+            ParseParity(s.GetStr("parity", "even")),
+            ParseStopBits(s.GetStr("stop_bits", "one")));
     }
 
     private static Parity ParseParity(string s) => s.ToLowerInvariant() switch

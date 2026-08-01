@@ -122,6 +122,7 @@ public sealed class MercuryProtocol(IMercuryTransport transport, byte address, i
 
     private async Task<byte[]> SendAndReceiveAsync(byte[] request, CancellationToken ct)
     {
+        using var busLock = await transport.AcquireAsync(ct);
         await transport.WriteAsync(request, ct);
 
         var buffer = new List<byte>();
