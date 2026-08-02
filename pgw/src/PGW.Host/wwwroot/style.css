@@ -228,7 +228,11 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 #sc-body.stale { opacity: .45; }
 
 /* ---- OPC UA address-space browse dialog ---- */
-#browse-dialog { width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column; }
+/* [open] matters here: an unscoped `display` on a <dialog> overrides the UA stylesheet's
+   `dialog:not([open]) { display: none }`, so without this the panel would render inline in the page
+   flow all the time instead of only as a modal when openBrowseDialog() calls showModal(). */
+#browse-dialog { width: min(640px, 92vw); max-height: 80vh; }
+#browse-dialog[open] { display: flex; flex-direction: column; }
 .browse-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 20px; border-bottom: 1px solid var(--border);
