@@ -168,4 +168,69 @@ public class HotReloadTests
 
         await engine.StopAsync();
     }
+
+    /// <summary>Dashboard Stop/Start/Restart button: Stop must actually release the output's TCP port (not
+    /// just stop answering on it), Start must rebind and serve fresh data again, and IsRunning must track
+    /// both transitions so a REST layer can reject a redundant Stop/Start.</summary>
+    [Fact]
+    public async Task Stop_Frees_The_Outputs_Port_And_Start_Rebinds_And_Serves_Again()
+    {
+        var plcPort = TestUtil.GetFreePort();
+        var scadaPort = TestUtil.GetFreePort();
+
+        using var plc = new ModbusTcpServer();
+        plc.Start(new IPEndPoint(IPAddress.Loopback, plcPort));
+        plc.AddUnit(1);
+        SeedPlc(plc, 111);
+
+        var paths = new TempPathProvider();
+        var configPath = WriteConfig(Path.Combine(paths.ConfigDir, "project.yaml"), plcPort, scadaPort, scanRateMs: 150);
+
+        var engine = new GatewayEngine(paths, configPath);
+        Assert.Empty(engine.LoadAndValidate());
+        using var cts = new CancellationTokenSource();
+
+        Assert.False(engine.IsRunning);
+        await engine.StartAsync(cts.Token);
+        Assert.True(engine.IsRunning);
+
+        using (var scada = new ModbusTcpClient { ReadTimeout = 2000 })
+        {
+            scada.Connect(new IPEndPoint(IPAddress.Loopback, scadaPort));
+            await TestUtil.WaitUntilAsync(() =>
+                scada.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token).GetAwaiter().GetResult().ToArray()[0] == 111,
+                TimeSpan.FromSeconds(3));
+        }
+
+        // A no-op Start while already running must not double-spawn the background loops or throw.
+        await engine.StartAsync(cts.Token);
+        Assert.True(engine.IsRunning);
+
+        await engine.StopAsync();
+        Assert.False(engine.IsRunning);
+
+        // A no-op Stop while already stopped must be harmless.
+        await engine.StopAsync();
+        Assert.False(engine.IsRunning);
+
+        // The real proof: the port must be genuinely free, not just refusing protocol traffic — a brand
+        // new listener has to be able to bind it.
+        using (var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, scadaPort))
+        {
+            probe.Start();
+            probe.Stop();
+        }
+
+        SeedPlc(plc, 222);
+        await engine.StartAsync(cts.Token);
+        Assert.True(engine.IsRunning);
+
+        using var scada2 = new ModbusTcpClient { ReadTimeout = 2000 };
+        scada2.Connect(new IPEndPoint(IPAddress.Loopback, scadaPort));
+        await TestUtil.WaitUntilAsync(() =>
+            scada2.ReadHoldingRegistersAsync<ushort>(1, 0, 1, cts.Token).GetAwaiter().GetResult().ToArray()[0] == 222,
+            TimeSpan.FromSeconds(3));
+
+        await engine.StopAsync();
+    }
 }

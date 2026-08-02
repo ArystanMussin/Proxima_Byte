@@ -18,6 +18,13 @@
       <button class="tab-btn" data-view="config">Config</button>
       <button class="tab-btn" data-view="scanner">Modbus Tool</button>
     </nav>
+    <div class="gw-controls">
+      <span id="run-dot" class="dot good" title="running"></span>
+      <span id="run-label">running</span>
+      <button id="stop-btn" class="ctrl-btn" title="Остановить опрос источников и Modbus TCP Server-выходы (порты освобождаются); REST/панель продолжают работать">Stop</button>
+      <button id="start-btn" class="ctrl-btn" title="Запустить снова из текущего конфига" hidden>Start</button>
+      <button id="restart-btn" class="ctrl-btn" title="Полный перезапуск: остановить и собрать всё заново из текущего конфига — полезно после смены порта">Restart</button>
+    </div>
     <div class="meta"><span id="conn-dot" class="dot good"></span><span id="gw-meta">connecting…</span></div>
   </header>
 

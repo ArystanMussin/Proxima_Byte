@@ -426,11 +426,39 @@ app.MapGet("/runtime/status", () => new
     sources = gatewayEngine.Config.Sources.Count,
     outputs = gatewayEngine.Config.Outputs.Count,
     tags = gatewayEngine.TagSpace.GetAll().Count,
+    running = gatewayEngine.IsRunning,
 });
 app.MapPost("/runtime/reload", async () =>
 {
     var errors = await gatewayEngine.ReloadAsync();
     return errors.Count == 0 ? Results.Ok(new { ok = true, version = gatewayEngine.ConfigVersion }) : Results.BadRequest(new { ok = false, errors });
+});
+// Engine lifecycle control (dashboard Stop/Start/Restart): in-process only — disconnects every
+// driver and stops every Modbus TCP Server output (freeing their ports), or rebuilds everything from
+// the current on-disk config. The REST API/dashboard itself is a separate ASP.NET Core host and stays
+// up throughout, so Start is always reachable again after a Stop. Does not touch the OS-level
+// Windows Service/systemd unit — see README "Управление шлюзом" for why that's a separate concern.
+app.MapPost("/runtime/stop", async () =>
+{
+    if (!gatewayEngine.IsRunning) return Results.BadRequest(new { ok = false, error = "already stopped" });
+    await gatewayEngine.StopAsync();
+    return Results.Ok(new { ok = true, running = gatewayEngine.IsRunning });
+});
+app.MapPost("/runtime/start", async () =>
+{
+    if (gatewayEngine.IsRunning) return Results.BadRequest(new { ok = false, error = "already running" });
+    var errors = gatewayEngine.LoadAndValidate();
+    if (errors.Count > 0) return Results.BadRequest(new { ok = false, errors });
+    await gatewayEngine.StartAsync(app.Lifetime.ApplicationStopping);
+    return Results.Ok(new { ok = true, running = gatewayEngine.IsRunning, version = gatewayEngine.ConfigVersion });
+});
+app.MapPost("/runtime/restart", async () =>
+{
+    var errors = gatewayEngine.LoadAndValidate();
+    if (errors.Count > 0) return Results.BadRequest(new { ok = false, errors });
+    await gatewayEngine.StopAsync();
+    await gatewayEngine.StartAsync(app.Lifetime.ApplicationStopping);
+    return Results.Ok(new { ok = true, running = gatewayEngine.IsRunning, version = gatewayEngine.ConfigVersion });
 });
 app.MapGet("/runtime/event-log", (int? last) => gatewayEngine.EventLog.Snapshot(last));
 app.MapGet("/runtime/api-log", (int? last) => gatewayEngine.ApiLog.Snapshot(last));

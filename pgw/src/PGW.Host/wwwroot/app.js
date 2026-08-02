@@ -31,6 +31,13 @@ function renderStatus(status) {
   $("#gw-name").textContent = status.name ?? "PGW";
   $("#gw-meta").textContent =
     `uptime ${status.uptime_s}s · config v${status.version} · ${status.tags} tags · ${status.sources} sources · ${status.outputs} outputs`;
+
+  const running = status.running !== false; // default true for older/other status shapes
+  $("#run-dot").className = `dot ${running ? "good" : "bad"}`;
+  $("#run-label").textContent = running ? "running" : "stopped";
+  $("#stop-btn").hidden = !running;
+  $("#start-btn").hidden = running;
+  $("#restart-btn").disabled = false;
 }
 
 // Splits `_System.<name>.<field>` tags into per-source/per-output health groups.
@@ -192,6 +199,28 @@ $("#reload-btn").addEventListener("click", async () => {
   await loadConfig();
   tick();
 });
+
+async function engineControl(btn, url, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  const el = $(btn);
+  el.disabled = true;
+  try {
+    const res = await fetch(url, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) alert("Ошибка: " + [].concat(data.errors ?? data.error ?? res.statusText).join("; "));
+  } catch (err) {
+    alert("Ошибка: " + err.message);
+  } finally {
+    el.disabled = false;
+    tick();
+  }
+}
+
+$("#stop-btn").addEventListener("click", () =>
+  engineControl("#stop-btn", "/runtime/stop", "Остановить опрос всех источников и Modbus TCP Server-выходы? Подключённые SCADA/HMI-клиенты будут отключены."));
+$("#start-btn").addEventListener("click", () => engineControl("#start-btn", "/runtime/start"));
+$("#restart-btn").addEventListener("click", () =>
+  engineControl("#restart-btn", "/runtime/restart", "Полный перезапуск шлюза — все источники и выходы переподключатся заново. Продолжить?"));
 
 async function loadConfig() {
   [cfgSources, cfgOutputs] = await Promise.all([getJson("/config/channels"), getJson("/config/outputs")]);

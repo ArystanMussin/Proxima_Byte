@@ -21,6 +21,10 @@ public sealed class GatewayEngine
     public RingLog ApiLog { get; } = new();
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
     public int ConfigVersion { get; private set; }
+    // Lets StartAsync/StopAsync be called again on demand (dashboard Stop/Start/Restart button) instead
+    // of only once at host boot/shutdown — guards against double-spawning the system-tags/persist loops
+    // if Start is requested while already running, or a no-op Stop while already stopped.
+    public bool IsRunning { get; private set; }
 
     private static readonly string[] KnownDrivers = { ModbusSourceFactory.TypeId, ModbusRtuSourceFactory.TypeId, OpcUaSourceFactory.TypeId, MercurySourceFactory.TypeId, Iec104SourceFactory.TypeId, DlmsSourceFactory.TypeId };
     private static readonly string[] KnownInterfaces = { ModbusOutputFactory.TypeId };
@@ -108,6 +112,7 @@ public sealed class GatewayEngine
 
     public async Task StartAsync(CancellationToken hostCt)
     {
+        if (IsRunning) return; // already running — starting again would double the background loops
         _hostCt = hostCt;
         _runCts = CancellationTokenSource.CreateLinkedTokenSource(hostCt);
         var ct = _runCts.Token;
@@ -116,6 +121,7 @@ public sealed class GatewayEngine
         await ReconcileAsync(previous: null, ct);
 
         ConfigVersion++;
+        IsRunning = true;
         _ = RunSystemTagsLoopAsync(ct);
         if (Config.Gateway.PersistLastValues)
             _ = RunPersistLoopAsync(ct);
@@ -123,6 +129,7 @@ public sealed class GatewayEngine
 
     public async Task StopAsync()
     {
+        if (!IsRunning) return;
         await _runCts.CancelAsync();
         foreach (var (cfg, iface) in _interfaceEntries.Values)
         {
@@ -138,6 +145,7 @@ public sealed class GatewayEngine
 
         if (Config.Gateway.PersistLastValues)
             TagPersistence.Save(TagSpace, LastValuesPath);
+        IsRunning = false;
     }
 
     /// <summary>
